@@ -348,11 +348,16 @@ func (c *Client) peerTitle(ctx context.Context, p tg.PeerClass, users map[int64]
 		}
 		return "", nil
 	case *tg.PeerChannel:
-		// TODO: channel title resolution — out of scope for this task.
-		// The bundled Chats slice carries Channel objects with titles, so this is
-		// a straightforward lookup, but we're deferring until the Dialog struct's
-		// channel story is finalized.
-		_ = v
+		ch, ok := chats[v.ChannelID]
+		if !ok {
+			return "", nil
+		}
+		switch c := ch.(type) {
+		case *tg.Channel:
+			return c.Title, nil
+		case *tg.ChannelForbidden:
+			return c.Title, nil
+		}
 		return "", nil
 	default:
 		return "", fmt.Errorf("unknown peer type %T", p)
