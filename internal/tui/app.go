@@ -14,18 +14,19 @@ import (
 
 // App holds the tview Application and our state.
 type App struct {
-	tv          *tview.Application
-	header      *tview.TextView
-	sidebar     *tview.List
-	chat        *tview.TextView
-	input       *tview.InputField
-	status      *tview.TextView
-	body        *tview.Flex
-	api         telegram.API
-	dialogs     []telegram.Dialog
-	activeIdx   int
+	tv           *tview.Application
+	header       *tview.TextView
+	sidebar      *tview.List
+	chat         *tview.TextView
+	input        *tview.InputField
+	status       *tview.TextView
+	body         *tview.Flex
+	right        *tview.Flex // chat-over-input pane, child of body
+	api          telegram.API
+	dialogs      []telegram.Dialog
+	activeIdx    int
 	sidebarShown bool
-	ctx         context.Context
+	ctx          context.Context
 }
 
 // Run blocks until the user quits. api must be connected before calling.
@@ -42,35 +43,57 @@ func Run(ctx context.Context, api telegram.API, selfName string) error {
 }
 
 func (a *App) build(selfName string) {
+	// Color palette — one accent (cyan), one muted gray. Keeps the UI
+	// readable without competing with chat content for attention.
+	accent := tcell.ColorAqua
+	muted := tcell.ColorDarkSlateGray
+	dimText := tcell.ColorLightSlateGray
+
+	// Header: single line, accent color. Acts as a status bar.
 	a.header = tview.NewTextView().
-		SetText(fmt.Sprintf(" tgchat — %s   Ctrl+C quit · Tab switch · F10 toggle sidebar ", selfName)).
-		SetTextColor(tcell.ColorWhite)
+		SetText(fmt.Sprintf(" tgchat  %s   F10 sidebar · Tab switch · Ctrl+C quit ", selfName)).
+		SetTextColor(dimText)
 	a.header.SetBorder(false)
 
+	// Sidebar: bordered list with rounded-corner title.
 	a.sidebar = tview.NewList().ShowSecondaryText(false)
-	a.sidebar.SetBorder(true).SetTitle(" Dialogs ")
+	a.sidebar.SetBorder(true).
+		SetTitle(" Dialogs ").
+		SetTitleColor(accent).
+		SetBorderColor(muted)
 
+	// Chat: scrollable, dynamic colors so FormatMessage can colorize senders.
 	a.chat = tview.NewTextView().
 		SetDynamicColors(true).
 		SetScrollable(true).
 		SetChangedFunc(func() { a.tv.Draw() })
-	a.chat.SetBorder(true).SetTitle(" Chat ")
+	a.chat.SetBorder(true).
+		SetTitle(" Chat ").
+		SetTitleColor(accent).
+		SetBorderColor(muted)
 
+	// Input: framed box with cyan prompt label, full width (FieldWidth=0).
 	a.input = tview.NewInputField().
 		SetLabel(" > ").
+		SetLabelColor(accent).
 		SetFieldWidth(0)
-	a.input.SetBorder(true).SetTitle(" Input ")
+	a.input.SetBorder(true).
+		SetTitle(" Message ").
+		SetTitleColor(accent).
+		SetBorderColor(muted)
 
+	// Status: thin muted line, centered text.
 	a.status = tview.NewTextView().SetTextAlign(tview.AlignCenter)
 	a.status.SetBorder(false)
+	a.status.SetTextColor(dimText)
 
 	// Layout: header on top, main row (sidebar | (chat over input)), status at bottom.
-	right := tview.NewFlex().SetDirection(tview.FlexRow).
+	a.right = tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(a.chat, 0, 4, false).
 		AddItem(a.input, 3, 1, true)
-	a.body = tview.NewFlex().
+	a.body = tview.NewFlex().SetDirection(tview.FlexColumn).
 		AddItem(a.sidebar, 24, 0, true).
-		AddItem(right, 0, 1, false)
+		AddItem(a.right, 0, 1, false)
 
 	root := tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(a.header, 1, 0, false).
@@ -112,14 +135,22 @@ func (a *App) bindKeys() {
 // toggleSidebar removes or re-adds the sidebar in the body flex. When shown,
 // focus returns to the sidebar so arrow keys navigate dialogs immediately;
 // when hidden, focus stays on the input.
+//
+// Implementation note: tview's Flex always appends new items, so re-adding
+// the sidebar with AddItem would put it AFTER the chat pane (right side).
+// We Clear() and rebuild the body in the correct order: sidebar first, then
+// chat pane.
 func (a *App) toggleSidebar() {
 	if a.sidebarShown {
-		a.body.RemoveItem(a.sidebar)
+		a.body.Clear()
+		a.body.AddItem(a.right, 0, 1, false)
 		a.sidebarShown = false
 		a.tv.SetFocus(a.input)
 		a.toast("sidebar hidden (F10 to show)")
 	} else {
+		a.body.Clear()
 		a.body.AddItem(a.sidebar, 24, 0, true)
+		a.body.AddItem(a.right, 0, 1, false)
 		a.sidebarShown = true
 		a.tv.SetFocus(a.sidebar)
 		a.toast("sidebar shown")
