@@ -57,14 +57,33 @@ func (c *Client) Dialogs(ctx context.Context) ([]Dialog, error) {
 	}
 
 	// gotd returns one of several slice variants; normalize to []DialogClass.
+	// The same response bundles Users/Chats with full objects (including access_hash),
+	// which peerTitle uses to avoid per-peer API calls.
 	var rawDialogs []tg.DialogClass
+	var users []tg.UserClass
+	var chats []tg.ChatClass
 	switch d := res.(type) {
 	case *tg.MessagesDialogs:
 		rawDialogs = d.Dialogs
+		users = d.Users
+		chats = d.Chats
 	case *tg.MessagesDialogsSlice:
 		rawDialogs = d.Dialogs
+		users = d.Users
+		chats = d.Chats
 	default:
 		return nil, fmt.Errorf("unexpected getDialogs response type %T", res)
+	}
+
+	userByID := make(map[int64]*tg.User, len(users))
+	for _, u := range users {
+		if u, ok := u.(*tg.User); ok {
+			userByID[u.ID] = u
+		}
+	}
+	chatByID := make(map[int64]tg.ChatClass, len(chats))
+	for _, ch := range chats {
+		chatByID[ch.GetID()] = ch
 	}
 
 	out := make([]Dialog, 0, len(rawDialogs))
@@ -73,7 +92,7 @@ func (c *Client) Dialogs(ctx context.Context) ([]Dialog, error) {
 		if !ok {
 			continue
 		}
-		dlg, err := c.dialogFromGotd(ctx, *d)
+		dlg, err := c.dialogFromGotd(ctx, *d, userByID, chatByID)
 		if err != nil {
 			continue // skip unresolvable; don't fail the whole list
 		}
@@ -83,8 +102,8 @@ func (c *Client) Dialogs(ctx context.Context) ([]Dialog, error) {
 }
 
 // dialogFromGotd extracts our Dialog from a gotd Dialog (which only carries peer + last msg metadata).
-func (c *Client) dialogFromGotd(ctx context.Context, d tg.Dialog) (Dialog, error) {
-	title, err := c.peerTitle(ctx, d.Peer)
+func (c *Client) dialogFromGotd(ctx context.Context, d tg.Dialog, users map[int64]*tg.User, chats map[int64]tg.ChatClass) (Dialog, error) {
+	title, err := c.peerTitle(ctx, d.Peer, users, chats)
 	if err != nil {
 		return Dialog{}, err
 	}
@@ -130,21 +149,10 @@ func peerKind(p tg.PeerClass) string {
 	}
 }
 
-func (c *Client) peerTitle(ctx context.Context, p tg.PeerClass) (string, error) {
+func (c *Client) peerTitle(ctx context.Context, p tg.PeerClass, users map[int64]*tg.User, chats map[int64]tg.ChatClass) (string, error) {
 	switch v := p.(type) {
 	case *tg.PeerUser:
-		// AccessHash 0 is wrong — but PeerChannel/PeerUser don't carry it.
-		// The dialog response bundles Users with their AccessHash; plumbing
-		// those through is the right fix. For now this builds; runtime calls
-		// will likely fail with USER_ID_INVALID until that lands.
-		u, err := c.raw.API().UsersGetFullUser(ctx, &tg.InputUser{UserID: v.UserID})
-		if err != nil {
-			return "", err
-		}
-		if len(u.Users) == 0 {
-			return "", nil
-		}
-		user, ok := u.Users[0].(*tg.User)
+		user, ok := users[v.UserID]
 		if !ok {
 			return "", nil
 		}
@@ -153,24 +161,22 @@ func (c *Client) peerTitle(ctx context.Context, p tg.PeerClass) (string, error) 
 		}
 		return user.FirstName, nil
 	case *tg.PeerChat:
-		ch, err := c.raw.API().MessagesGetChats(ctx, []int64{v.ChatID})
-		if err != nil {
-			return "", err
-		}
-		mc, ok := ch.(*tg.MessagesChats)
-		if !ok || len(mc.Chats) == 0 {
-			return "", nil
-		}
-		chat, ok := mc.Chats[0].(*tg.Chat)
+		ch, ok := chats[v.ChatID]
 		if !ok {
 			return "", nil
 		}
-		return chat.Title, nil
+		switch c := ch.(type) {
+		case *tg.Chat:
+			return c.Title, nil
+		case *tg.ChatForbidden:
+			return c.Title, nil
+		}
+		return "", nil
 	case *tg.PeerChannel:
-		// TODO: channel title resolution. ChannelsGetChannels requires the channel's
-		// AccessHash (not carried by PeerChannel), so we can't resolve a title from a
-		// bare peer here. The dialog response's Chats slice carries Channel objects
-		// with titles — when that gets plumbed through dialogFromGotd, use it.
+		// TODO: channel title resolution — out of scope for this task.
+		// The bundled Chats slice carries Channel objects with titles, so this is
+		// a straightforward lookup, but we're deferring until the Dialog struct's
+		// channel story is finalized.
 		_ = v
 		return "", nil
 	default:
