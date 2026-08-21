@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"os"
 	"time"
 
 	"github.com/gotd/td/session"
@@ -24,6 +25,13 @@ func New(ctx context.Context, appID int, apiHash, sessionFile string) (*Client, 
 	storage := &session.FileStorage{Path: sessionFile}
 	raw := telegram.NewClient(appID, apiHash, telegram.Options{
 		SessionStorage: storage,
+		// OnConnectionState is called on every primary-conn state change.
+		// We log to stderr so we can see whether the gotd handshake is making
+		// progress when SelfName blocks — distinguishes "never connected" from
+		// "connected but UsersGetUsers was rejected".
+		OnConnectionState: func(s telegram.ConnectionState) {
+			fmt.Fprintf(os.Stderr, "[tgchat-conn] state=%s\n", s)
+		},
 	})
 	return &Client{raw: raw, storage: storage}, nil
 }

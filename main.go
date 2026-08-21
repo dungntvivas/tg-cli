@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/user/tgchat/internal/auth"
 	"github.com/user/tgchat/internal/config"
@@ -64,7 +65,9 @@ func run() error {
 	}()
 
 	fmt.Fprintln(os.Stderr, "[tgchat] waiting for connection, fetching self...")
-	selfName, err := client.SelfName(ctx)
+	fetchCtx, fetchCancel := context.WithTimeout(ctx, 30*time.Second)
+	selfName, err := client.SelfName(fetchCtx)
+	fetchCancel()
 	if err != nil {
 		return fmt.Errorf("fetch self: %w", err)
 	}
