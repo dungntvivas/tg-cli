@@ -63,9 +63,14 @@ func (a *App) build(selfName string) {
 		SetBorderColor(muted)
 
 	// Chat: scrollable, dynamic colors so FormatMessage can colorize senders.
+	// Word wrap is disabled because formatOutgoing pre-wraps long outgoing
+	// lines for right-alignment; letting tview re-wrap would break the
+	// padding logic and misalign the right edge.
 	a.chat = tview.NewTextView().
 		SetDynamicColors(true).
 		SetScrollable(true).
+		SetWrap(false).
+		SetWordWrap(false).
 		SetChangedFunc(func() { a.tv.Draw() })
 	a.chat.SetBorder(true).
 		SetTitle(" Chat ").
@@ -252,7 +257,7 @@ func (a *App) loadHistory(limit int) {
 		a.toast(fmt.Sprintf("history error: %v", err))
 		return
 	}
-	a.chat.SetText(RenderHistory(msgs))
+	a.chat.SetText(RenderHistory(msgs, chatPaneWidth(a.chat)))
 	// Track-end mode: keeps the newest line visible when SetText is called,
 	// so opening a chat or sending a message auto-scrolls to the bottom
 	// (matches how chat UIs behave).
@@ -299,4 +304,15 @@ func (a *App) toast(msg string) {
 			}
 		})
 	}()
+}
+
+// chatPaneWidth returns the chat TextView's drawable width in cells (rect
+// width minus the 2-cell border). Falls back to a sane default before the
+// view has been laid out (e.g. during construction).
+func chatPaneWidth(tv *tview.TextView) int {
+	_, _, w, _ := tv.GetRect()
+	if w <= 2 {
+		return 80
+	}
+	return w - 2
 }
