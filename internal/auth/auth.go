@@ -19,33 +19,26 @@ import (
 //
 // client is the raw gotd *telegram.Client; the session is stored in the
 // FileStorage passed to telegram.NewClientOptions at construction time.
+//
+// The prompts are intentionally driven by gotd's flow: it calls Phone() → sends
+// the code via SendCode() → calls Code() → (if 2FA required) calls Password().
+// Pre-prompting for the code would race Telegram's send — the user would be
+// asked for "the code Telegram sent" before Telegram actually sent it.
 func Run(ctx context.Context, client *telegram.Client) error {
 	reader := bufio.NewReader(os.Stdin)
-
-	phone, err := prompt(reader, "Enter phone number (international format, e.g. +84...): ")
-	if err != nil {
-		return err
-	}
-
-	code, err := prompt(reader, "Enter the code Telegram sent: ")
-	if err != nil {
-		return err
-	}
-
-	// Custom authenticator: 2FA password is prompted only if Telegram requests it
-	// (gotd's Flow calls Auth.Password(ctx) on ErrPasswordAuthNeeded, so we read
-	// it lazily here).
 	authenticator := &promptAuth{
-		reader: reader,
-		phone:  phone,
-		code:   code,
+		prompt: func(label string) (string, error) {
+			fmt.Print(label)
+			line, err := reader.ReadString('\n')
+			if err != nil {
+				return "", fmt.Errorf("read input: %w", err)
+			}
+			return strings.TrimSpace(line), nil
+		},
 	}
-
 	flow := auth.NewFlow(authenticator, auth.SendCodeOptions{})
 
 	return client.Run(ctx, func(ctx context.Context) error {
-		// Flow.Run returns plain error (not a tuple); on success, the session
-		// is already persisted by FileStorage.
 		if err := flow.Run(ctx, client.Auth()); err != nil {
 			return fmt.Errorf("auth: %w", err)
 		}
@@ -53,24 +46,25 @@ func Run(ctx context.Context, client *telegram.Client) error {
 	})
 }
 
-// promptAuth holds the phone + code and prompts for 2FA password lazily, only
-// when gotd's flow requests it.
+// promptAuth implements auth.UserAuthenticator with lazy prompts driven by
+// gotd's flow. No fields are pre-collected; each method reads on demand.
 type promptAuth struct {
-	reader *bufio.Reader
-	phone  string
-	code   string
+	prompt func(label string) (string, error)
 }
 
 func (a *promptAuth) Phone(_ context.Context) (string, error) {
-	return a.phone, nil
+	return a.prompt("Enter phone number (international format, e.g. +84...): ")
 }
 
 func (a *promptAuth) Code(_ context.Context, _ *tg.AuthSentCode) (string, error) {
-	return a.code, nil
+	return a.prompt("Enter the code Telegram sent: ")
 }
 
+// Password is called by gotd's flow only when Telegram reports 2FA is required
+// (ErrPasswordAuthNeeded). On empty input we return ErrPasswordNotProvided so
+// the flow surfaces a meaningful error instead of attempting SignIn with "".
 func (a *promptAuth) Password(_ context.Context) (string, error) {
-	pw, err := prompt(a.reader, "Enter 2FA password: ")
+	pw, err := a.prompt("Enter 2FA password: ")
 	if err != nil {
 		return "", err
 	}
@@ -89,13 +83,4 @@ func (a *promptAuth) AcceptTermsOfService(_ context.Context, tos tg.HelpTermsOfS
 
 func (a *promptAuth) SignUp(_ context.Context) (auth.UserInfo, error) {
 	return auth.UserInfo{}, fmt.Errorf("sign up not supported")
-}
-
-func prompt(r *bufio.Reader, label string) (string, error) {
-	fmt.Print(label)
-	line, err := r.ReadString('\n')
-	if err != nil {
-		return "", fmt.Errorf("read input: %w", err)
-	}
-	return strings.TrimSpace(line), nil
 }
