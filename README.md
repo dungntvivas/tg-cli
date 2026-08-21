@@ -43,7 +43,6 @@ runs skip auth.
 - No file/image send.
 - `/open <peer_id>` (numeric form) not implemented; only `/open <index>` works.
 - `Esc` does not clear input; Enter submits and clears.
-- Channel dialog titles may show as empty for some channel types (TODO in `internal/telegram/client.go:351`).
 - Invalid-peer errors appear in the status bar (transient toast), not inline-red in the input box.
 - Telegram flood-wait errors are not auto-retried; user must retry the command manually.
 - Corrupt session file: delete `$TG_SESSION_DIR/session.json` and re-run to re-authenticate.
