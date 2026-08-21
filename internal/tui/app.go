@@ -4,6 +4,9 @@ package tui
 import (
 	"context"
 	"fmt"
+	"os/exec"
+	"runtime"
+	"strings"
 	"time"
 
 	"github.com/gdamore/tcell/v2"
@@ -51,7 +54,7 @@ func (a *App) build(selfName string) {
 
 	// Header: single line, accent color. Acts as a status bar.
 	a.header = tview.NewTextView().
-		SetText(fmt.Sprintf(" tgchat  %s   F10 sidebar · Tab switch · Ctrl+C quit ", selfName)).
+		SetText(fmt.Sprintf(" tgchat  %s   F10 sidebar · Tab switch · Ctrl+Y copy · Ctrl+C quit ", selfName)).
 		SetTextColor(dimText)
 	a.header.SetBorder(false)
 
@@ -126,6 +129,12 @@ func (a *App) bindKeys() {
 			return nil
 		case tcell.KeyF10:
 			a.toggleSidebar()
+			return nil
+		case tcell.KeyCtrlY:
+			// Copy current chat to system clipboard. tview's mouse mode
+			// blocks the terminal's native selection, so we expose the text
+			// explicitly via the OS clipboard.
+			a.yankChat()
 			return nil
 		case tcell.KeyTab:
 			// Cycle focus: sidebar <-> input. Skip sidebar when hidden.
@@ -290,7 +299,8 @@ func (a *App) showHelp() {
 			"  /quit               exit\n\n" +
 			"Or just type and press Enter to send.\n" +
 			"Tab cycles focus between sidebar and input.\n" +
-			"F10 toggles sidebar visibility.",
+			"F10 toggles sidebar visibility.\n" +
+			"Ctrl+Y copies the current chat to the system clipboard.",
 	)
 }
 
@@ -315,4 +325,56 @@ func chatPaneWidth(tv *tview.TextView) int {
 		return 80
 	}
 	return w - 2
+}
+
+// yankChat copies the current chat view contents to the system clipboard,
+// stripping the ANSI color codes that tview would otherwise display. Toasts
+// the number of lines copied (or the failure reason).
+//
+// Why this exists: tview's EnableMouse(true) requests SGR mouse reporting, so
+// the terminal stops allowing native drag-to-select. The only way to get chat
+// text out is to push it through the OS clipboard ourselves.
+func (a *App) yankChat() {
+	raw := a.chat.GetText(true)
+	if strings.TrimSpace(raw) == "" {
+		a.toast("nothing to copy")
+		return
+	}
+	text := StripANSI(raw)
+	if err := copyToClipboard(text); err != nil {
+		a.toast(fmt.Sprintf("copy failed: %v (install xclip/xsel on Linux)", err))
+		return
+	}
+	lines := 0
+	for _, l := range strings.Split(text, "\n") {
+		if strings.TrimSpace(l) != "" {
+			lines++
+		}
+	}
+	a.toast(fmt.Sprintf("copied %d lines to clipboard", lines))
+}
+
+// copyToClipboard writes `text` to the OS clipboard via the platform-native
+// helper (clip.exe on Windows, pbcopy on macOS, xclip or xsel on Linux).
+func copyToClipboard(text string) error {
+	var cmd *exec.Cmd
+	switch runtime.GOOS {
+	case "windows":
+		cmd = exec.Command("clip")
+	case "darwin":
+		cmd = exec.Command("pbcopy")
+	default:
+		// Linux: prefer xclip, fall back to xsel. Both are de-facto standard
+		// on desktop distros. wayland-clipboard is another candidate, but
+		// wayland users typically have one of these aliased anyway.
+		if _, err := exec.LookPath("xclip"); err == nil {
+			cmd = exec.Command("xclip", "-selection", "clipboard")
+		} else if _, err := exec.LookPath("xsel"); err == nil {
+			cmd = exec.Command("xsel", "--clipboard", "--input")
+		} else {
+			return fmt.Errorf("no clipboard tool found")
+		}
+	}
+	cmd.Stdin = strings.NewReader(text)
+	return cmd.Run()
 }

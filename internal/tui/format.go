@@ -101,6 +101,30 @@ func rightPad(s string, width int) string {
 	return strings.Repeat(" ", pad) + s
 }
 
+// StripANSI removes ANSI CSI escape sequences (ESC ... m/K) from `s`, leaving
+// plain text. Used to clean chat text before copying to the clipboard.
+func StripANSI(s string) string {
+	var b strings.Builder
+	state := -1
+	esc := false
+	for len(s) > 0 {
+		var cluster string
+		cluster, s, _, state = uniseg.FirstGraphemeClusterInString(s, state)
+		if !esc && len(cluster) > 0 && cluster[0] == 0x1b {
+			esc = true
+			continue
+		}
+		if esc {
+			if strings.ContainsAny(cluster, "mK") {
+				esc = false
+			}
+			continue
+		}
+		b.WriteString(cluster)
+	}
+	return b.String()
+}
+
 // wrapGraphemes splits `s` so each piece is at most `width` cells wide. ANSI
 // escapes are preserved but don't count toward the width. Wrapping iterates
 // grapheme clusters (so emoji and combining marks stay intact) and breaks at

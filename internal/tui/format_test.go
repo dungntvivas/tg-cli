@@ -5,8 +5,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/rivo/uniseg"
-
 	"github.com/user/tgchat/internal/telegram"
 )
 
@@ -189,26 +187,21 @@ func TestWrapGraphemes_PreservesUTF8(t *testing.T) {
 	}
 }
 
-// stripANSI removes ANSI CSI escape sequences (ESC ... m/K) so substring
-// assertions in tests don't see the raw SGR codes.
-func stripANSI(s string) string {
-	var b strings.Builder
-	state := -1
-	esc := false
-	for len(s) > 0 {
-		var cluster string
-		cluster, s, _, state = uniseg.FirstGraphemeClusterInString(s, state)
-		if !esc && len(cluster) > 0 && cluster[0] == 0x1b {
-			esc = true
-			continue
-		}
-		if esc {
-			if strings.ContainsAny(cluster, "mK") {
-				esc = false
-			}
-			continue
-		}
-		b.WriteString(cluster)
+// stripANSI is a thin wrapper around the exported StripANSI for in-test
+// readability. They share an implementation.
+func stripANSI(s string) string { return StripANSI(s) }
+
+func TestStripANSI(t *testing.T) {
+	cases := []struct{ in, want string }{
+		{"\033[35mhello\033[0m", "hello"},
+		{"plain text", "plain text"},
+		{"\033[1;31mbold red\033[0m normal", "bold red normal"},
+		{"", ""},
+		{"\033[K", ""},
 	}
-	return b.String()
+	for _, c := range cases {
+		if got := StripANSI(c.in); got != c.want {
+			t.Errorf("StripANSI(%q) = %q, want %q", c.in, got, c.want)
+		}
+	}
 }
