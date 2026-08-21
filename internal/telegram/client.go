@@ -15,7 +15,6 @@ import (
 // Client wraps gotd/td behind our API interface.
 type Client struct {
 	raw     *telegram.Client
-	self    *tg.User
 	storage session.Storage
 }
 
@@ -29,17 +28,32 @@ func New(ctx context.Context, appID int, apiHash, sessionFile string) (*Client, 
 	return &Client{raw: raw, storage: storage}, nil
 }
 
+// Raw exposes the underlying gotd client. main.go uses it to hand the client
+// to auth.Run for first-run authentication; nothing else above this package
+// should touch it.
+func (c *Client) Raw() *telegram.Client {
+	return c.raw
+}
+
 // Run starts the client and blocks until ctx is done. Auth must already be complete.
 func (c *Client) Run(ctx context.Context) error {
 	return c.raw.Run(ctx, func(ctx context.Context) error {
-		self, err := c.raw.Self(ctx)
-		if err != nil {
-			return fmt.Errorf("fetch self: %w", err)
-		}
-		c.self = self
 		<-ctx.Done()
 		return nil
 	})
+}
+
+// SelfName returns the current user's display name (e.g. "@alice" or "Alice").
+// Requires client.Run() to have been started so the gotd client is connected.
+func (c *Client) SelfName(ctx context.Context) (string, error) {
+	u, err := c.raw.Self(ctx)
+	if err != nil {
+		return "", fmt.Errorf("fetch self: %w", err)
+	}
+	if u.Username != "" {
+		return "@" + u.Username, nil
+	}
+	return u.FirstName, nil
 }
 
 func (c *Client) Close() error {
