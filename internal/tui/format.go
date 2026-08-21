@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/rivo/uniseg"
+
 	"github.com/user/tgchat/internal/telegram"
 )
 
@@ -35,14 +37,14 @@ func formatIncoming(msg telegram.Message) string {
 
 // formatOutgoing renders outgoing text with each visible line right-aligned in
 // `width` columns. The "› You" header is one line; the body may span multiple
-// pre-wrapped lines.
+// pre-wrapped lines. Each user-supplied newline starts a new wrapped segment
+// (hard break), so wrapping never splits across user lines.
 func formatOutgoing(msg telegram.Message, width int) string {
 	const youColor = "\033[35m"  // magenta
 	const bodyColor = "\033[37m" // light gray
 	const reset = "\033[0m"
 	const indent = "  "
 
-	// Header: "› You" — short, never wraps in practice.
 	header := "› You"
 	if width > 0 {
 		header = youColor + rightPad(header, width) + reset
@@ -50,81 +52,96 @@ func formatOutgoing(msg telegram.Message, width int) string {
 		header = youColor + header + reset
 	}
 
-	// Body: prepend indent to each user-supplied line, wrap to `width`, then
-	// pad each wrapped line so every line ends at the right column.
 	bodyRaw := indent + strings.ReplaceAll(msg.Text, "\n", "\n"+indent)
 	if width <= 0 {
 		return header + "\n" + bodyColor + bodyRaw + reset
 	}
-	wrapped := wrapVisible(bodyRaw, width)
-	for i, line := range wrapped {
-		wrapped[i] = bodyColor + rightPad(line, width) + reset
+	var lines []string
+	for _, seg := range strings.Split(bodyRaw, "\n") {
+		for _, w := range wrapGraphemes(seg, width) {
+			lines = append(lines, bodyColor+rightPad(w, width)+reset)
+		}
 	}
-	return header + "\n" + strings.Join(wrapped, "\n")
+	return header + "\n" + strings.Join(lines, "\n")
 }
 
-// visibleWidth returns the number of terminal cells `s` occupies, ignoring
-// ANSI CSI escape sequences (ESC[...m / ESC[K).
-func visibleWidth(s string) int {
+// displayWidth returns the number of terminal cells `s` occupies, ignoring
+// ANSI CSI escape sequences (ESC[...m / ESC[K). Wide grapheme clusters
+// (CJK, emoji) and combining marks are counted via uniseg so the result
+// matches what the terminal actually renders.
+func displayWidth(s string) int {
 	w := 0
-	inEscape := false
-	for _, r := range s {
-		if r == 0x1b {
-			inEscape = true
+	state := -1
+	esc := false
+	for len(s) > 0 {
+		var cluster string
+		cluster, s, _, state = uniseg.FirstGraphemeClusterInString(s, state)
+		if !esc && len(cluster) > 0 && cluster[0] == 0x1b {
+			esc = true
 			continue
 		}
-		if inEscape {
-			if r == 'm' || r == 'K' {
-				inEscape = false
+		if esc {
+			// Sequence ends on the cluster containing 'm' (SGR) or 'K' (EL).
+			if strings.ContainsAny(cluster, "mK") {
+				esc = false
 			}
 			continue
 		}
-		w++
+		w += uniseg.StringWidth(cluster)
 	}
 	return w
 }
 
 // rightPad prepends spaces so `s` occupies `width` cells visually.
 func rightPad(s string, width int) string {
-	pad := width - visibleWidth(s)
+	pad := width - displayWidth(s)
 	if pad <= 0 {
 		return s
 	}
 	return strings.Repeat(" ", pad) + s
 }
 
-// wrapVisible splits `s` so each piece is at most `width` cells wide. ANSI
-// escapes are preserved but don't count toward the width. Wrapping is greedy:
-// characters are taken until the next one would push the line past `width`.
-func wrapVisible(s string, width int) []string {
-	if width <= 0 || visibleWidth(s) <= width {
+// wrapGraphemes splits `s` so each piece is at most `width` cells wide. ANSI
+// escapes are preserved but don't count toward the width. Wrapping iterates
+// grapheme clusters (so emoji and combining marks stay intact) and breaks at
+// cluster boundaries — no mid-cluster splits, no byte-boundary UTF-8 breaks.
+func wrapGraphemes(s string, width int) []string {
+	if width <= 0 || displayWidth(s) <= width {
 		return []string{s}
 	}
 	var lines []string
 	var cur strings.Builder
 	curW := 0
-	inEscape := false
+	state := -1
+	esc := false
+	rest := s
 
-	for _, r := range s {
-		if r == 0x1b {
-			inEscape = true
-			cur.WriteRune(r)
+	for len(rest) > 0 {
+		var cluster string
+		var w int
+		cluster, rest, w, state = uniseg.FirstGraphemeClusterInString(rest, state)
+		if !esc && len(cluster) > 0 && cluster[0] == 0x1b {
+			esc = true
+			cur.WriteString(cluster)
 			continue
 		}
-		if inEscape {
-			cur.WriteRune(r)
-			if r == 'm' || r == 'K' {
-				inEscape = false
+		if esc {
+			cur.WriteString(cluster)
+			if strings.ContainsAny(cluster, "mK") {
+				esc = false
 			}
 			continue
 		}
-		if curW >= width {
+		// Flush when adding this cluster would overflow. Allow a single
+		// cluster wider than `width` (e.g. an emoji at width=1) by breaking
+		// anyway rather than spinning.
+		if curW > 0 && curW+w > width {
 			lines = append(lines, cur.String())
 			cur.Reset()
 			curW = 0
 		}
-		cur.WriteRune(r)
-		curW++
+		cur.WriteString(cluster)
+		curW += w
 	}
 	if cur.Len() > 0 {
 		lines = append(lines, cur.String())

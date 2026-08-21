@@ -5,6 +5,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/rivo/uniseg"
+
 	"github.com/user/tgchat/internal/telegram"
 )
 
@@ -22,11 +24,9 @@ func TestFormatMessage_Outgoing(t *testing.T) {
 	if !strings.Contains(got, "hello") {
 		t.Errorf("missing text: %q", got)
 	}
-	// timestamps are no longer rendered
 	if strings.Contains(got, "10:25") {
 		t.Errorf("outgoing should not render timestamp: %q", got)
 	}
-	// outgoing messages render with a leading marker
 	if !strings.HasPrefix(strings.TrimSpace(stripANSI(got)), "›") {
 		t.Errorf("outgoing should start with '›' marker, got %q", got)
 	}
@@ -73,8 +73,6 @@ func TestFormatMessage_EmptyText(t *testing.T) {
 }
 
 func TestFormatMessage_OutgoingRightAligned(t *testing.T) {
-	// Outgoing text shorter than the pane width must end at the right column
-	// (i.e. the visible part of the line equals `width`).
 	m := telegram.Message{
 		Sender: "You", Text: "hi", Outgoing: true,
 		Time: time.Now(),
@@ -82,21 +80,19 @@ func TestFormatMessage_OutgoingRightAligned(t *testing.T) {
 	const width = 20
 	got := FormatMessage(m, width)
 	for _, line := range strings.Split(got, "\n") {
-		if visibleWidth(line) != width {
+		if displayWidth(line) != width {
 			t.Errorf("outgoing line not right-aligned: visible=%d, want=%d, line=%q",
-				visibleWidth(line), width, line)
+				displayWidth(line), width, line)
 		}
 	}
 }
 
 func TestFormatMessage_OutgoingLongLineWraps(t *testing.T) {
-	// A long outgoing line should be wrapped, with EACH wrapped piece
-	// right-aligned (so continuation lines stay flush against the right edge).
 	m := telegram.Message{
-		Sender: "You",
-		Text:   strings.Repeat("x", 50), // > 20
-		Outgoing: true,
-		Time:    time.Now(),
+		Sender:    "You",
+		Text:      strings.Repeat("x", 50),
+		Outgoing:  true,
+		Time:      time.Now(),
 	}
 	const width = 20
 	got := FormatMessage(m, width)
@@ -105,16 +101,14 @@ func TestFormatMessage_OutgoingLongLineWraps(t *testing.T) {
 		t.Fatalf("expected header + at least 2 wrapped lines, got %d: %q", len(lines), got)
 	}
 	for i, line := range lines {
-		if visibleWidth(line) != width {
+		if displayWidth(line) != width {
 			t.Errorf("line %d not right-aligned: visible=%d, want=%d, line=%q",
-				i, visibleWidth(line), width, line)
+				i, displayWidth(line), width, line)
 		}
 	}
 }
 
 func TestFormatMessage_OutgoingWidthZeroFallback(t *testing.T) {
-	// When width is unknown (e.g. before layout), still produce valid text —
-	// no panic, no double-padding.
 	m := telegram.Message{Sender: "You", Text: "hi", Outgoing: true, Time: time.Now()}
 	got := FormatMessage(m, 0)
 	if !strings.Contains(got, "hi") || !strings.Contains(got, "You") {
@@ -122,9 +116,52 @@ func TestFormatMessage_OutgoingWidthZeroFallback(t *testing.T) {
 	}
 }
 
-func TestVisibleWidth_IgnoresEscapes(t *testing.T) {
-	if got := visibleWidth("\033[35mhello\033[0m"); got != 5 {
-		t.Errorf("visibleWidth = %d, want 5", got)
+// TestFormatMessage_OutgoingUserNewlineIsHardBreak: a user-supplied newline
+// must start a fresh wrapped segment — wrap must NEVER cut across a '\n'.
+// Regression for the bug where outgoing messages in Saved Messages showed
+// garbage characters because wrapGraphemes treated '\n' as a 1-cell char and
+// split mid-line across the newline.
+func TestFormatMessage_OutgoingUserNewlineIsHardBreak(t *testing.T) {
+	m := telegram.Message{
+		Sender:   "You",
+		Text:     "first line\nsecond line\nthird line",
+		Outgoing: true,
+		Time:     time.Now(),
+	}
+	const width = 80
+	got := FormatMessage(m, width)
+	stripped := stripANSI(got)
+	for _, want := range []string{"first line", "second line", "third line"} {
+		if !strings.Contains(stripped, want) {
+			t.Errorf("missing %q in %q", want, got)
+		}
+	}
+	// No wrapped line should be a CONTIGUOUS slice that crosses a user \n.
+	// Walk every visible line and assert it does not contain the literal
+	// sequence "line\nsecond" or "line\nthird" — i.e. wrap never glued two
+	// user-lines into one.
+	for _, line := range strings.Split(stripped, "\n") {
+		if strings.Contains(line, "line\nsecond") || strings.Contains(line, "line\nthird") {
+			t.Errorf("user newline was wrapped across: %q", line)
+		}
+	}
+}
+
+func TestDisplayWidth_IgnoresEscapes(t *testing.T) {
+	if got := displayWidth("\033[35mhello\033[0m"); got != 5 {
+		t.Errorf("displayWidth = %d, want 5", got)
+	}
+}
+
+func TestDisplayWidth_CountsWideCharsAs2(t *testing.T) {
+	// CJK chars are 2 cells each. displayWidth must match what the terminal
+	// renders, otherwise right-alignment and wrap are off by one cell per
+	// wide char and we get garbled output for messages containing them.
+	if got := displayWidth("你好"); got != 4 {
+		t.Errorf("displayWidth(\"你好\") = %d, want 4 (2 cells per CJK char)", got)
+	}
+	if got := displayWidth("👋hi"); got != 4 { // emoji 2 + h 1 + i 1
+		t.Errorf("displayWidth(\"👋hi\") = %d, want 4", got)
 	}
 }
 
@@ -135,22 +172,43 @@ func TestRightPad_NoOpWhenTooLong(t *testing.T) {
 	}
 }
 
-// stripANSI removes CSI escape sequences for substring assertions.
+// TestWrapGraphemes_PreservesUTF8: regression for any byte-boundary splits.
+// Iterating by grapheme cluster (not bytes) keeps emoji + combining marks
+// intact across wrap boundaries.
+func TestWrapGraphemes_PreservesUTF8(t *testing.T) {
+	// 5 emoji, each 2 cells → 10 cells. Width 4 → wrap every ~2 emoji.
+	got := wrapGraphemes("👋👋👋👋👋", 4)
+	for _, line := range got {
+		if displayWidth(line) > 4 {
+			t.Errorf("wrapped line wider than requested: %q (width %d)", line, displayWidth(line))
+		}
+	}
+	// Reconstructed output must equal the original (no missing graphemes).
+	if strings.Join(got, "") != "👋👋👋👋👋" {
+		t.Errorf("wrapGraphemes lost or duplicated graphemes: %q", got)
+	}
+}
+
+// stripANSI removes ANSI CSI escape sequences (ESC ... m/K) so substring
+// assertions in tests don't see the raw SGR codes.
 func stripANSI(s string) string {
 	var b strings.Builder
-	inEscape := false
-	for _, r := range s {
-		if r == 0x1b {
-			inEscape = true
+	state := -1
+	esc := false
+	for len(s) > 0 {
+		var cluster string
+		cluster, s, _, state = uniseg.FirstGraphemeClusterInString(s, state)
+		if !esc && len(cluster) > 0 && cluster[0] == 0x1b {
+			esc = true
 			continue
 		}
-		if inEscape {
-			if r == 'm' || r == 'K' {
-				inEscape = false
+		if esc {
+			if strings.ContainsAny(cluster, "mK") {
+				esc = false
 			}
 			continue
 		}
-		b.WriteRune(r)
+		b.WriteString(cluster)
 	}
 	return b.String()
 }
