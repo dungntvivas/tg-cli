@@ -2,7 +2,11 @@ module github.com/user/tgchat
 
 go 1.26.7
 
-require github.com/gotd/td v0.161.0
+require (
+	github.com/gdamore/tcell/v2 v2.13.10
+	github.com/gotd/td v0.161.0
+	github.com/rivo/tview v0.42.0
+)
 
 require (
 	github.com/andybalholm/brotli v1.2.1 // indirect
@@ -12,7 +16,6 @@ require (
 	github.com/dlclark/regexp2 v1.12.0 // indirect
 	github.com/fatih/color v1.19.0 // indirect
 	github.com/gdamore/encoding v1.0.1 // indirect
-	github.com/gdamore/tcell/v2 v2.13.10 // indirect
 	github.com/ghodss/yaml v1.0.0 // indirect
 	github.com/go-faster/errors v0.7.1 // indirect
 	github.com/go-faster/jx v1.2.0 // indirect
@@ -28,7 +31,6 @@ require (
 	github.com/mattn/go-isatty v0.0.22 // indirect
 	github.com/ogen-go/ogen v1.23.0 // indirect
 	github.com/refraction-networking/utls v1.8.2 // indirect
-	github.com/rivo/tview v0.42.0 // indirect
 	github.com/rivo/uniseg v0.4.7 // indirect
 	github.com/segmentio/asm v1.2.1 // indirect
 	github.com/shopspring/decimal v1.4.0 // indirect
