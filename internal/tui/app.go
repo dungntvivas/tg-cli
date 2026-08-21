@@ -14,25 +14,28 @@ import (
 
 // App holds the tview Application and our state.
 type App struct {
-	tv        *tview.Application
-	header    *tview.TextView
-	sidebar   *tview.List
-	chat      *tview.TextView
-	input     *tview.InputField
-	status    *tview.TextView
-	api       telegram.API
-	dialogs   []telegram.Dialog
-	activeIdx int
-	ctx       context.Context
+	tv          *tview.Application
+	header      *tview.TextView
+	sidebar     *tview.List
+	chat        *tview.TextView
+	input       *tview.InputField
+	status      *tview.TextView
+	body        *tview.Flex
+	api         telegram.API
+	dialogs     []telegram.Dialog
+	activeIdx   int
+	sidebarShown bool
+	ctx         context.Context
 }
 
 // Run blocks until the user quits. api must be connected before calling.
 func Run(ctx context.Context, api telegram.API, selfName string) error {
 	app := &App{
-		tv:        tview.NewApplication(),
-		api:       api,
-		ctx:       ctx,
-		activeIdx: -1,
+		tv:           tview.NewApplication(),
+		api:          api,
+		ctx:          ctx,
+		activeIdx:    -1,
+		sidebarShown: true,
 	}
 	app.build(selfName)
 	return app.tv.Run()
@@ -40,7 +43,7 @@ func Run(ctx context.Context, api telegram.API, selfName string) error {
 
 func (a *App) build(selfName string) {
 	a.header = tview.NewTextView().
-		SetText(fmt.Sprintf(" tgchat — %s   Ctrl+C quit · Tab switch ", selfName)).
+		SetText(fmt.Sprintf(" tgchat — %s   Ctrl+C quit · Tab switch · F10 toggle sidebar ", selfName)).
 		SetTextColor(tcell.ColorWhite)
 	a.header.SetBorder(false)
 
@@ -65,13 +68,13 @@ func (a *App) build(selfName string) {
 	right := tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(a.chat, 0, 4, false).
 		AddItem(a.input, 3, 1, true)
-	body := tview.NewFlex().
+	a.body = tview.NewFlex().
 		AddItem(a.sidebar, 24, 0, true).
 		AddItem(right, 0, 1, false)
 
 	root := tview.NewFlex().SetDirection(tview.FlexRow).
 		AddItem(a.header, 1, 0, false).
-		AddItem(body, 0, 1, true).
+		AddItem(a.body, 0, 1, true).
 		AddItem(a.status, 1, 0, false)
 
 	a.tv.SetRoot(root, true).EnableMouse(true)
@@ -86,8 +89,15 @@ func (a *App) bindKeys() {
 		case tcell.KeyCtrlC:
 			a.tv.Stop()
 			return nil
+		case tcell.KeyF10:
+			a.toggleSidebar()
+			return nil
 		case tcell.KeyTab:
-			// Cycle focus: sidebar <-> input.
+			// Cycle focus: sidebar <-> input. Skip sidebar when hidden.
+			if !a.sidebarShown {
+				a.tv.SetFocus(a.input)
+				return nil
+			}
 			if a.tv.GetFocus() == a.sidebar {
 				a.tv.SetFocus(a.input)
 			} else {
@@ -97,6 +107,23 @@ func (a *App) bindKeys() {
 		}
 		return e
 	})
+}
+
+// toggleSidebar removes or re-adds the sidebar in the body flex. When shown,
+// focus returns to the sidebar so arrow keys navigate dialogs immediately;
+// when hidden, focus stays on the input.
+func (a *App) toggleSidebar() {
+	if a.sidebarShown {
+		a.body.RemoveItem(a.sidebar)
+		a.sidebarShown = false
+		a.tv.SetFocus(a.input)
+		a.toast("sidebar hidden (F10 to show)")
+	} else {
+		a.body.AddItem(a.sidebar, 24, 0, true)
+		a.sidebarShown = true
+		a.tv.SetFocus(a.sidebar)
+		a.toast("sidebar shown")
+	}
 }
 
 func (a *App) bindInput() {
@@ -219,7 +246,8 @@ func (a *App) showHelp() {
 			"  /help               this help\n" +
 			"  /quit               exit\n\n" +
 			"Or just type and press Enter to send.\n" +
-			"Tab cycles focus between sidebar and input.",
+			"Tab cycles focus between sidebar and input.\n" +
+			"F10 toggles sidebar visibility.",
 	)
 }
 
