@@ -1,0 +1,68 @@
+// Package telegram wraps the gotd/td MTProto client behind a small interface.
+// gotd types MUST NOT leak above this package boundary.
+package telegram
+
+import (
+	"context"
+	"time"
+)
+
+// Dialog is one conversation in the user's dialog list.
+type Dialog struct {
+	ID       int64
+	Kind     string // "user", "group", or "channel" — needed by TUI to know peer type
+	Title    string
+	Unread   int
+	LastMsg  string
+	LastTime time.Time
+}
+
+// Message is one chat message.
+type Message struct {
+	ID       int64
+	Sender   string // display name; "You" if Outgoing
+	Text     string
+	Time     time.Time
+	Outgoing bool
+}
+
+// Peer identifies a chat target. Kind is "user", "group", or "channel".
+type Peer struct {
+	ID   int64
+	Kind string
+}
+
+// API is the surface the TUI consumes. *Client implements it; tests use *FakeAPI.
+type API interface {
+	Dialogs(ctx context.Context) ([]Dialog, error)
+	History(ctx context.Context, peer Peer, limit int) ([]Message, error)
+	Send(ctx context.Context, peer Peer, text string) (Message, error)
+}
+
+// FakeAPI lets tests script API behavior via function fields. Nil fields return zero values with no error.
+type FakeAPI struct {
+	DialogsFn func(ctx context.Context) ([]Dialog, error)
+	HistoryFn func(ctx context.Context, peer Peer, limit int) ([]Message, error)
+	SendFn    func(ctx context.Context, peer Peer, text string) (Message, error)
+}
+
+func (f *FakeAPI) Dialogs(ctx context.Context) ([]Dialog, error) {
+	if f.DialogsFn == nil {
+		return nil, nil
+	}
+	return f.DialogsFn(ctx)
+}
+
+func (f *FakeAPI) History(ctx context.Context, peer Peer, limit int) ([]Message, error) {
+	if f.HistoryFn == nil {
+		return nil, nil
+	}
+	return f.HistoryFn(ctx, peer, limit)
+}
+
+func (f *FakeAPI) Send(ctx context.Context, peer Peer, text string) (Message, error) {
+	if f.SendFn == nil {
+		return Message{}, nil
+	}
+	return f.SendFn(ctx, peer, text)
+}
