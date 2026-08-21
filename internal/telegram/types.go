@@ -9,12 +9,13 @@ import (
 
 // Dialog is one conversation in the user's dialog list.
 type Dialog struct {
-	ID       int64
-	Kind     string // "user", "group", or "channel" — needed by TUI to know peer type
-	Title    string
-	Unread   int
-	LastMsg  string
-	LastTime time.Time
+	ID         int64
+	Kind       string // "user", "group", or "channel" — needed by TUI to know peer type
+	Title      string
+	Unread     int
+	LastMsg    string
+	LastTime   time.Time
+	AccessHash int64 // required to address users/channels via the API
 }
 
 // Message is one chat message.
@@ -27,9 +28,11 @@ type Message struct {
 }
 
 // Peer identifies a chat target. Kind is "user", "group", or "channel".
+// AccessHash is required for user/channel destinations; 0 for group chats.
 type Peer struct {
-	ID   int64
-	Kind string
+	ID         int64
+	Kind       string
+	AccessHash int64
 }
 
 // API is the surface the TUI consumes. *Client implements it; tests use *FakeAPI.

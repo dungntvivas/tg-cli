@@ -111,11 +111,36 @@ func (c *Client) dialogFromGotd(ctx context.Context, d tg.Dialog, users map[int6
 		return Dialog{}, err
 	}
 	return Dialog{
-		ID:     peerID(d.Peer),
-		Kind:   peerKind(d.Peer),
-		Title:  title,
-		Unread: d.UnreadCount,
+		ID:         peerID(d.Peer),
+		Kind:       peerKind(d.Peer),
+		Title:      title,
+		Unread:     d.UnreadCount,
+		AccessHash: c.accessHash(d.Peer, users, chats),
 	}, nil
+}
+
+// accessHash extracts the access_hash for user/channel peers from the bundled
+// Users/Chats maps. Returns 0 for groups (which don't need one) or unknown peers.
+func (c *Client) accessHash(p tg.PeerClass, users map[int64]*tg.User, chats map[int64]tg.ChatClass) int64 {
+	switch v := p.(type) {
+	case *tg.PeerUser:
+		if u, ok := users[v.UserID]; ok {
+			return u.AccessHash
+		}
+	case *tg.PeerChannel:
+		if ch, ok := chats[v.ChannelID]; ok {
+			if cc, ok := ch.(*tg.Channel); ok {
+				if ah, ok := cc.GetAccessHash(); ok {
+					return ah
+				}
+				return cc.AccessHash
+			}
+			if cf, ok := ch.(*tg.ChannelForbidden); ok {
+				return cf.GetAccessHash()
+			}
+		}
+	}
+	return 0
 }
 
 // History returns the most recent `limit` messages from `peer` (oldest-first within the window).
@@ -237,11 +262,17 @@ func (c *Client) Send(ctx context.Context, peer Peer, text string) (Message, err
 func (c *Client) inputPeer(p Peer) (tg.InputPeerClass, error) {
 	switch p.Kind {
 	case "user":
-		return &tg.InputPeerUser{UserID: p.ID}, nil
+		if p.AccessHash == 0 {
+			return nil, fmt.Errorf("inputPeer: %s peer %d has no access_hash; refresh dialogs", p.Kind, p.ID)
+		}
+		return &tg.InputPeerUser{UserID: p.ID, AccessHash: p.AccessHash}, nil
 	case "group":
 		return &tg.InputPeerChat{ChatID: p.ID}, nil
 	case "channel":
-		return &tg.InputPeerChannel{ChannelID: p.ID}, nil
+		if p.AccessHash == 0 {
+			return nil, fmt.Errorf("inputPeer: %s peer %d has no access_hash; refresh dialogs", p.Kind, p.ID)
+		}
+		return &tg.InputPeerChannel{ChannelID: p.ID, AccessHash: p.AccessHash}, nil
 	default:
 		return nil, fmt.Errorf("unknown peer kind %q", p.Kind)
 	}
