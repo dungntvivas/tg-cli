@@ -5,7 +5,6 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
-	"os"
 	"time"
 
 	"github.com/gotd/td/session"
@@ -20,23 +19,17 @@ type Client struct {
 }
 
 // New constructs a Client. sessionFile is the path to a JSON file (gotd-managed).
-// Call Run(ctx) to actually connect.
+// Call Run(ctx, f) to actually connect; f is invoked once the connection is
+// ready and stays connected.
 func New(ctx context.Context, appID int, apiHash, sessionFile string) (*Client, error) {
 	storage := &session.FileStorage{Path: sessionFile}
 	raw := telegram.NewClient(appID, apiHash, telegram.Options{
 		SessionStorage: storage,
-		// We do not need push updates; the TUI fetches history on demand.
-		// Disabling updates skips gotd's internal c.Self() "subscribe" call
-		// (see telegram.connect.runUntilRestart), which races with our own
-		// SelfName() and was observed to deadlock on the same auth key.
+		// We don't need push updates; the TUI fetches history on demand.
+		// Disabling updates also skips gotd's internal c.Self() subscribe
+		// goroutine (see telegram.connect.runUntilRestart), saving a
+		// round-trip per session start.
 		NoUpdates: true,
-		// OnConnectionState is called on every primary-conn state change.
-		// We log to stderr so we can see whether the gotd handshake is making
-		// progress when SelfName blocks — distinguishes "never connected" from
-		// "connected but UsersGetUsers was rejected".
-		OnConnectionState: func(s telegram.ConnectionState) {
-			fmt.Fprintf(os.Stderr, "[tgchat-conn] state=%s\n", s)
-		},
 	})
 	return &Client{raw: raw, storage: storage}, nil
 }
@@ -48,12 +41,19 @@ func (c *Client) Raw() *telegram.Client {
 	return c.raw
 }
 
-// Run starts the client and blocks until ctx is done. Auth must already be complete.
-func (c *Client) Run(ctx context.Context) error {
-	return c.raw.Run(ctx, func(ctx context.Context) error {
-		<-ctx.Done()
-		return nil
-	})
+// Run starts the client and runs f when the connection is ready. f receives
+// the same ctx and must not return until ctx is cancelled (otherwise Run will
+// tear down the connection).
+//
+// Why f is required: gotd's Run performs a `replaceConn` inside (to load the
+// persisted auth key). If a caller invokes on `c.raw` before that replace has
+// happened, it can hit the *stale* conn — which never has its `gotConfig`
+// signal fired because nothing starts it. Passing f into Run closes that race:
+// f is only invoked after `c.ready.Ready()` fires, which only happens once the
+// post-replace conn has finished init. (See telegram/client.go onReady and
+// telegram/session.go restoreConnection.)
+func (c *Client) Run(ctx context.Context, f func(ctx context.Context) error) error {
+	return c.raw.Run(ctx, f)
 }
 
 // SelfName returns the current user's display name (e.g. "@alice" or "Alice").
