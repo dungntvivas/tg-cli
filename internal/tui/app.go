@@ -188,6 +188,10 @@ func (a *App) loadHistory(limit int) {
 		return
 	}
 	a.chat.SetText(RenderHistory(msgs))
+	// Track-end mode: keeps the newest line visible when SetText is called,
+	// so opening a chat or sending a message auto-scrolls to the bottom
+	// (matches how chat UIs behave).
+	a.chat.ScrollToEnd()
 }
 
 func (a *App) sendMessage(text string) {
