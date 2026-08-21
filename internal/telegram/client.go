@@ -2,7 +2,10 @@ package telegram
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"fmt"
+	"time"
 
 	"github.com/gotd/td/session"
 	"github.com/gotd/td/telegram"
@@ -115,12 +118,139 @@ func (c *Client) dialogFromGotd(ctx context.Context, d tg.Dialog, users map[int6
 	}, nil
 }
 
+// History returns the most recent `limit` messages from `peer` (oldest-first within the window).
 func (c *Client) History(ctx context.Context, peer Peer, limit int) ([]Message, error) {
-	return nil, fmt.Errorf("History: not yet implemented")
+	inputPeer, err := c.inputPeer(peer)
+	if err != nil {
+		return nil, err
+	}
+	res, err := c.raw.API().MessagesGetHistory(ctx, &tg.MessagesGetHistoryRequest{
+		Peer:  inputPeer,
+		Limit: limit,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("get history: %w", err)
+	}
+
+	// gotd returns one of several slice variants; normalize. Each carries
+	// bundled Users/Chats — use those to resolve sender names instead of
+	// per-peer API calls (Task 10 fix).
+	var msgs []tg.MessageClass
+	var users []tg.UserClass
+	var chats []tg.ChatClass
+	switch m := res.(type) {
+	case *tg.MessagesMessages:
+		msgs = m.Messages
+		users = m.Users
+		chats = m.Chats
+	case *tg.MessagesMessagesSlice:
+		msgs = m.Messages
+		users = m.Users
+		chats = m.Chats
+	case *tg.MessagesChannelMessages:
+		msgs = m.Messages
+		users = m.Users
+		chats = m.Chats
+	default:
+		return nil, fmt.Errorf("unexpected history response type %T", res)
+	}
+
+	userByID := make(map[int64]*tg.User, len(users))
+	for _, u := range users {
+		if u, ok := u.(*tg.User); ok {
+			userByID[u.ID] = u
+		}
+	}
+	chatByID := make(map[int64]tg.ChatClass, len(chats))
+	for _, ch := range chats {
+		chatByID[ch.GetID()] = ch
+	}
+
+	out := make([]Message, 0, len(msgs))
+	for _, mc := range msgs {
+		if mm, ok := mc.(*tg.Message); ok {
+			out = append(out, c.messageFromGotd(ctx, mm, userByID, chatByID))
+		}
+	}
+	return out, nil
 }
 
+func (c *Client) messageFromGotd(ctx context.Context, m *tg.Message, users map[int64]*tg.User, chats map[int64]tg.ChatClass) Message {
+	sender := "unknown"
+	if m.FromID != nil {
+		if title, _ := c.peerTitle(ctx, m.FromID, users, chats); title != "" {
+			sender = title
+		} else {
+			sender = fmt.Sprint(peerID(m.FromID))
+		}
+	}
+	if m.Out {
+		sender = "You"
+	}
+	return Message{
+		ID:       int64(m.ID),
+		Sender:   sender,
+		Text:     m.Message,
+		Time:     time.Unix(int64(m.Date), 0),
+		Outgoing: m.Out,
+	}
+}
+
+// Send posts `text` to `peer` and returns the echoed message.
 func (c *Client) Send(ctx context.Context, peer Peer, text string) (Message, error) {
-	return Message{}, fmt.Errorf("Send: not yet implemented")
+	inputPeer, err := c.inputPeer(peer)
+	if err != nil {
+		return Message{}, err
+	}
+	res, err := c.raw.API().MessagesSendMessage(ctx, &tg.MessagesSendMessageRequest{
+		Peer:     inputPeer,
+		Message:  text,
+		RandomID: randInt64(),
+	})
+	if err != nil {
+		return Message{}, fmt.Errorf("send: %w", err)
+	}
+	echo := func(id int) Message {
+		return Message{ID: int64(id), Sender: "You", Text: text, Time: time.Now(), Outgoing: true}
+	}
+	// gotd returns UpdatesClass — different concrete types per destination.
+	// Pull UpdateMessageID (groups/channels) or fall through to UpdateShortMessage (P2P).
+	switch u := res.(type) {
+	case *tg.UpdateShortMessage:
+		return echo(u.ID), nil
+	case *tg.UpdatesCombined:
+		for _, x := range u.Updates {
+			if m, ok := x.(*tg.UpdateMessageID); ok {
+				return echo(m.ID), nil
+			}
+		}
+	case *tg.Updates:
+		for _, x := range u.Updates {
+			if m, ok := x.(*tg.UpdateMessageID); ok {
+				return echo(m.ID), nil
+			}
+		}
+	}
+	return echo(0), nil
+}
+
+func (c *Client) inputPeer(p Peer) (tg.InputPeerClass, error) {
+	switch p.Kind {
+	case "user":
+		return &tg.InputPeerUser{UserID: p.ID}, nil
+	case "group":
+		return &tg.InputPeerChat{ChatID: p.ID}, nil
+	case "channel":
+		return &tg.InputPeerChannel{ChannelID: p.ID}, nil
+	default:
+		return nil, fmt.Errorf("unknown peer kind %q", p.Kind)
+	}
+}
+
+func randInt64() int64 {
+	var b [8]byte
+	_, _ = rand.Read(b[:])
+	return int64(binary.LittleEndian.Uint64(b[:]))
 }
 
 func peerID(p tg.PeerClass) int64 {
