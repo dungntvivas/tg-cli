@@ -79,8 +79,11 @@ func (c *Client) Close() error {
 // Maps gotd types to our plain Dialog struct.
 func (c *Client) Dialogs(ctx context.Context) ([]Dialog, error) {
 	api := c.raw.API()
+	// OffsetPeer is required by the TL schema; pass InputPeerEmpty for the
+	// first page (no pagination cursor yet).
 	res, err := api.MessagesGetDialogs(ctx, &tg.MessagesGetDialogsRequest{
-		Limit: 100,
+		OffsetPeer: &tg.InputPeerEmpty{},
+		Limit:      100,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("get dialogs: %w", err)
