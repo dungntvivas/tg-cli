@@ -30,6 +30,15 @@ type App struct {
 	activeIdx    int
 	sidebarShown bool
 	ctx          context.Context
+	chatRaw      string // formatted chat text, kept so visual-mode re-renders preserve selection without losing scroll position
+	visMode      bool
+	visStart     cursorPos // anchor set when 'v' was pressed (inclusive)
+	visEnd       cursorPos // current cursor (inclusive)
+}
+
+// cursorPos is a 1-based (line, col) position in display cells.
+type cursorPos struct {
+	Line, Col int
 }
 
 // Run blocks until the user quits. api must be connected before calling.
@@ -69,9 +78,12 @@ func (a *App) build(selfName string) {
 	// Word wrap is disabled because formatOutgoing pre-wraps long outgoing
 	// lines for right-alignment; letting tview re-wrap would break the
 	// padding logic and misalign the right edge.
+	// Regions are enabled so visual-mode selection can be highlighted via
+	// tview.Highlight("sel").
 	a.chat = tview.NewTextView().
 		SetDynamicColors(true).
 		SetScrollable(true).
+		SetRegions(true).
 		SetWrap(false).
 		SetWordWrap(false).
 		SetChangedFunc(func() { a.tv.Draw() })
@@ -123,6 +135,7 @@ func (a *App) build(selfName string) {
 
 func (a *App) bindKeys() {
 	a.tv.SetInputCapture(func(e *tcell.EventKey) *tcell.EventKey {
+		// Global keys work regardless of focus.
 		switch e.Key() {
 		case tcell.KeyCtrlC:
 			a.tv.Stop()
@@ -149,8 +162,89 @@ func (a *App) bindKeys() {
 			}
 			return nil
 		}
+
+		// Visual mode + vim-style 'v' toggle are chat-scoped: only when the
+		// chat TextView has focus, otherwise the input field would eat 'v'.
+		if a.tv.GetFocus() != a.chat {
+			return e
+		}
+
+		if a.visMode {
+			if a.handleVisKey(e) {
+				return nil
+			}
+		} else if e.Key() == tcell.KeyRune && e.Rune() == 'v' {
+			a.enterVisualMode()
+			return nil
+		}
 		return e
 	})
+}
+
+// handleVisKey dispatches a key while in visual mode. Returns true if the key
+// was consumed (caller should drop it).
+func (a *App) handleVisKey(e *tcell.EventKey) bool {
+	// Arrow keys + Home/End move the cursor; vim letters do the same.
+	switch e.Key() {
+	case tcell.KeyEscape:
+		a.exitVisualMode()
+		return true
+	case tcell.KeyLeft, tcell.KeyBackspace:
+		a.moveVisCursor(0, -1)
+		return true
+	case tcell.KeyRight:
+		a.moveVisCursor(0, 1)
+		return true
+	case tcell.KeyUp:
+		a.moveVisCursor(-1, 0)
+		return true
+	case tcell.KeyDown:
+		a.moveVisCursor(1, 0)
+		return true
+	case tcell.KeyHome:
+		a.setVisCursorCol(1)
+		return true
+	case tcell.KeyEnd:
+		a.setVisCursorCol(lineLastCell(a.chatRaw, a.visEnd.Line))
+		return true
+	}
+	if e.Key() != tcell.KeyRune {
+		return false
+	}
+	switch e.Rune() {
+	case 'v':
+		a.exitVisualMode()
+		return true
+	case 'y':
+		a.visYank()
+		return true
+	case 'h':
+		a.moveVisCursor(0, -1)
+		return true
+	case 'j':
+		a.moveVisCursor(1, 0)
+		return true
+	case 'k':
+		a.moveVisCursor(-1, 0)
+		return true
+	case 'l':
+		a.moveVisCursor(0, 1)
+		return true
+	case '0':
+		a.setVisCursorCol(1)
+		return true
+	case '$':
+		a.setVisCursorCol(lineLastCell(a.chatRaw, a.visEnd.Line))
+		return true
+	case 'g':
+		a.setVisCursorPos(1, 1)
+		return true
+	case 'G':
+		lastLine := strings.Count(a.chatRaw, "\n") + 1
+		a.setVisCursorPos(lastLine, 1)
+		return true
+	}
+	return false
 }
 
 // toggleSidebar removes or re-adds the sidebar in the body flex. When shown,
@@ -266,7 +360,8 @@ func (a *App) loadHistory(limit int) {
 		a.toast(fmt.Sprintf("history error: %v", err))
 		return
 	}
-	a.chat.SetText(RenderHistory(msgs, chatPaneWidth(a.chat)))
+	a.chatRaw = RenderHistory(msgs, chatPaneWidth(a.chat))
+	a.refreshChat()
 	// Track-end mode: keeps the newest line visible when SetText is called,
 	// so opening a chat or sending a message auto-scrolls to the bottom
 	// (matches how chat UIs behave).
@@ -289,7 +384,7 @@ func (a *App) sendMessage(text string) {
 }
 
 func (a *App) showHelp() {
-	a.chat.SetText(
+	a.chatRaw =
 		"Commands:\n" +
 			"  /dialogs            refresh dialog list\n" +
 			"  /open <index>       switch to dialog at 1-based sidebar index\n" +
@@ -300,8 +395,10 @@ func (a *App) showHelp() {
 			"Or just type and press Enter to send.\n" +
 			"Tab cycles focus between sidebar and input.\n" +
 			"F10 toggles sidebar visibility.\n" +
-			"Ctrl+Y copies the current chat to the system clipboard.",
-	)
+			"Ctrl+Y copies the current chat to the system clipboard.\n" +
+			"v enters visual mode (when chat is focused) — use h/j/k/l to\n" +
+			"extend the selection, y to yank, v or Esc to cancel."
+	a.refreshChat()
 }
 
 func (a *App) toast(msg string) {
@@ -377,4 +474,151 @@ func copyToClipboard(text string) error {
 	}
 	cmd.Stdin = strings.NewReader(text)
 	return cmd.Run()
+}
+
+// --- Visual selection (vim-style) -------------------------------------------
+//
+// Click on the chat pane, press 'v' to enter visual mode, navigate with
+// h/j/k/l (or arrow keys), then 'y' to copy the selected cells to the
+// clipboard. 'v' or Esc exits visual mode without copying.
+
+// enterVisualMode starts visual mode anchored at the top-left of the chat.
+// Subsequent 'h/j/k/l' extends the selection.
+func (a *App) enterVisualMode() {
+	if a.visMode {
+		return
+	}
+	a.visMode = true
+	a.visStart = cursorPos{Line: 1, Col: 1}
+	a.visEnd = a.visStart
+	a.refreshChat()
+	a.status.SetText("-- VISUAL --")
+	a.tv.SetFocus(a.chat)
+}
+
+// exitVisualMode leaves visual mode without copying.
+func (a *App) exitVisualMode() {
+	if !a.visMode {
+		return
+	}
+	a.visMode = false
+	a.refreshChat()
+	a.status.SetText("")
+}
+
+// visYank copies the cell range from visStart..visEnd to the clipboard, then
+// exits visual mode.
+func (a *App) visYank() {
+	if !a.visMode {
+		return
+	}
+	text := StripANSI(ExtractSelection(a.chatRaw, a.visStart.Line, a.visStart.Col, a.visEnd.Line, a.visEnd.Col))
+	a.exitVisualMode()
+	if strings.TrimSpace(text) == "" {
+		a.toast("nothing selected")
+		return
+	}
+	if err := copyToClipboard(text); err != nil {
+		a.toast(fmt.Sprintf("yank failed: %v", err))
+		return
+	}
+	lines := 0
+	for _, l := range strings.Split(text, "\n") {
+		if strings.TrimSpace(l) != "" {
+			lines++
+		}
+	}
+	a.toast(fmt.Sprintf("yanked %d line%s (%d chars)", lines, plural(lines), len(text)))
+}
+
+// moveVisCursor shifts the visual cursor by (dLine, dCol) cells, clamped to the
+// chat bounds, then re-renders the selection highlight.
+func (a *App) moveVisCursor(dLine, dCol int) {
+	if !a.visMode {
+		return
+	}
+	lines := strings.Split(a.chatRaw, "\n")
+	a.visEnd.Line += dLine
+	a.visEnd.Col += dCol
+	a.clampVisCursor(lines)
+	a.refreshChat()
+}
+
+// setVisCursorCol jumps the cursor to `col` on the current line, clamped.
+func (a *App) setVisCursorCol(col int) {
+	if !a.visMode {
+		return
+	}
+	lines := strings.Split(a.chatRaw, "\n")
+	a.visEnd.Col = col
+	a.clampVisCursor(lines)
+	a.refreshChat()
+}
+
+// setVisCursorPos jumps to (line, col), clamped.
+func (a *App) setVisCursorPos(line, col int) {
+	if !a.visMode {
+		return
+	}
+	lines := strings.Split(a.chatRaw, "\n")
+	a.visEnd.Line = line
+	a.visEnd.Col = col
+	a.clampVisCursor(lines)
+	a.refreshChat()
+}
+
+// clampVisCursor ensures visEnd stays inside the chat text. A col value of 0
+// is allowed (one past the last cell, equivalent to vim's "$" + 1).
+func (a *App) clampVisCursor(lines []string) {
+	if len(lines) == 0 {
+		a.visEnd.Line = 1
+		a.visEnd.Col = 1
+		return
+	}
+	if a.visEnd.Line < 1 {
+		a.visEnd.Line = 1
+	}
+	if a.visEnd.Line > len(lines) {
+		a.visEnd.Line = len(lines)
+	}
+	lineW := displayWidth(lines[a.visEnd.Line-1])
+	if a.visEnd.Col < 1 {
+		a.visEnd.Col = 1
+	}
+	if a.visEnd.Col > lineW+1 {
+		a.visEnd.Col = lineW + 1
+	}
+}
+
+// refreshChat re-renders the chat view, preserving the user's scroll position
+// and (when in visual mode) applying the ["sel"] region around the selection.
+func (a *App) refreshChat() {
+	row, col := a.chat.GetScrollOffset()
+	text := a.chatRaw
+	if a.visMode {
+		text = ApplySelection(text, a.visStart.Line, a.visStart.Col, a.visEnd.Line, a.visEnd.Col)
+		a.chat.SetRegions(true)
+		a.chat.Highlight("sel")
+	} else {
+		a.chat.Highlight()
+	}
+	a.chat.SetText(text)
+	a.chat.ScrollTo(row, col)
+}
+
+// lineLastCell returns 1 + displayWidth(line), the column just past the last
+// cell. Used for '$' / End in visual mode.
+func lineLastCell(text string, lineNum int) int {
+	lines := strings.Split(text, "\n")
+	if lineNum < 1 || lineNum > len(lines) {
+		return 1
+	}
+	return displayWidth(lines[lineNum-1]) + 1
+}
+
+func plural(n int) string {
+	if n == 1 {
+		return ""
+	}
+	return "s"
 }

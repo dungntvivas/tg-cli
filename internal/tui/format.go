@@ -125,6 +125,168 @@ func StripANSI(s string) string {
 	return b.String()
 }
 
+// selectionRegionTag is the tview region id used to highlight the visually
+// selected range. Kept short so the surrounding ["..."] tags don't bloat the
+// rendered text.
+const selectionRegionTag = "sel"
+
+// ApplySelection wraps the cell range [sLine,sCol]..[eLine,eCol] (1-based,
+// inclusive) in tview region tags so Highlight can paint it. Coordinates are
+// in display cells (not bytes), so ANSI escape sequences don't shift them.
+// If the range is empty (start >= end) or out of bounds, the text is returned
+// unchanged.
+func ApplySelection(text string, sLine, sCol, eLine, eCol int) string {
+	lines := strings.Split(text, "\n")
+	if len(lines) == 0 {
+		return text
+	}
+	// Normalize so sLine,sCol comes first.
+	if sLine > eLine || (sLine == eLine && sCol > eCol) {
+		sLine, eLine = eLine, sLine
+		sCol, eCol = eCol, sCol
+	}
+	if sLine < 1 || eLine < 1 || sLine > len(lines) || eLine > len(lines) {
+		return text
+	}
+	if sCol < 1 || eCol < 1 {
+		return text
+	}
+	if sLine == eLine && sCol >= eCol {
+		return text
+	}
+
+	for i := range lines {
+		lineNum := i + 1
+		if lineNum < sLine || lineNum > eLine {
+			continue
+		}
+		var fromCell, toCell int
+		if lineNum == sLine {
+			fromCell = sCol
+		} else {
+			fromCell = 1
+		}
+		if lineNum == eLine {
+			toCell = eCol
+		} else {
+			toCell = displayWidth(lines[i]) + 1
+		}
+		if toCell <= fromCell {
+			continue
+		}
+		lines[i] = wrapLineRangeWithRegion(lines[i], fromCell, toCell)
+	}
+	return strings.Join(lines, "\n")
+}
+
+// wrapLineRangeWithRegion inserts `["sel"]...[""]` around the [fromCell, toCell)
+// cell range in `line`. ANSI escapes inside the line are skipped during the
+// cell count so the region aligns with what the terminal actually renders.
+func wrapLineRangeWithRegion(line string, fromCell, toCell int) string {
+	startByte, endByte := cellRangeToBytes(line, fromCell, toCell)
+	if startByte < 0 || endByte < 0 || endByte <= startByte {
+		return line
+	}
+	var b strings.Builder
+	b.WriteString(line[:startByte])
+	b.WriteString(`["` + selectionRegionTag + `"]`)
+	b.WriteString(line[startByte:endByte])
+	b.WriteString(`[""]`)
+	b.WriteString(line[endByte:])
+	return b.String()
+}
+
+// cellRangeToBytes returns the byte offsets [start, end) that cover the
+// [fromCell, toCell) cell range in `line`. Returns (-1, -1) if either bound
+// can't be resolved (e.g. past end of line).
+func cellRangeToBytes(line string, fromCell, toCell int) (int, int) {
+	state := -1
+	esc := false
+	cell := 1
+	startByte := -1
+	endByte := -1
+	original := line
+	rest := line
+	for len(rest) > 0 {
+		var cluster string
+		var w int
+		cluster, rest, w, state = uniseg.FirstGraphemeClusterInString(rest, state)
+		if !esc && len(cluster) > 0 && cluster[0] == 0x1b {
+			esc = true
+			continue
+		}
+		if esc {
+			if strings.ContainsAny(cluster, "mK") {
+				esc = false
+			}
+			continue
+		}
+		clusterStart := len(original) - len(rest) - len(cluster)
+		if startByte < 0 && cell >= fromCell {
+			startByte = clusterStart
+		}
+		cell += w
+		if endByte < 0 && cell >= toCell {
+			endByte = len(original) - len(rest)
+			break
+		}
+	}
+	if startByte < 0 {
+		return -1, -1
+	}
+	if endByte < 0 {
+		endByte = len(line)
+	}
+	return startByte, endByte
+}
+
+// ExtractSelection returns the cell-accurate substring of `text` covered by the
+// [sLine,sCol]..[eLine,eCol] range, with ANSI escapes preserved. Use
+// StripANSI on the result to get a plain-text copy for the clipboard.
+func ExtractSelection(text string, sLine, sCol, eLine, eCol int) string {
+	lines := strings.Split(text, "\n")
+	if len(lines) == 0 {
+		return ""
+	}
+	if sLine > eLine || (sLine == eLine && sCol > eCol) {
+		sLine, eLine = eLine, sLine
+		sCol, eCol = eCol, sCol
+	}
+	if sLine < 1 || eLine < 1 || sLine > len(lines) || eLine > len(lines) {
+		return ""
+	}
+	if sLine == eLine && sCol >= eCol {
+		return ""
+	}
+	var parts []string
+	for i := range lines {
+		lineNum := i + 1
+		if lineNum < sLine || lineNum > eLine {
+			continue
+		}
+		var fromCell, toCell int
+		if lineNum == sLine {
+			fromCell = sCol
+		} else {
+			fromCell = 1
+		}
+		if lineNum == eLine {
+			toCell = eCol
+		} else {
+			toCell = displayWidth(lines[i]) + 1
+		}
+		if toCell <= fromCell {
+			continue
+		}
+		startByte, endByte := cellRangeToBytes(lines[i], fromCell, toCell)
+		if startByte < 0 || endByte < 0 {
+			continue
+		}
+		parts = append(parts, lines[i][startByte:endByte])
+	}
+	return strings.Join(parts, "\n")
+}
+
 // wrapGraphemes splits `s` so each piece is at most `width` cells wide. ANSI
 // escapes are preserved but don't count toward the width. Wrapping iterates
 // grapheme clusters (so emoji and combining marks stay intact) and breaks at

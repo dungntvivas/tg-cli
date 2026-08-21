@@ -205,3 +205,87 @@ func TestStripANSI(t *testing.T) {
 		}
 	}
 }
+
+// TestApplySelection_SingleLine covers a single-line, ANSI-padded selection.
+// The region must wrap the visible cells only — escape sequences must stay
+// outside the region so the highlight aligns with what the terminal draws.
+//
+// Cell coordinates are 1-based and the range is half-open [from, to): from=2,
+// to=5 means cells 2,3,4 are selected.
+func TestApplySelection_SingleLine(t *testing.T) {
+	in := "\033[35mABCDE\033[0m"
+	out := ApplySelection(in, 1, 2, 1, 5)
+	want := "\033[35mA[\"sel\"]BCD[\"\"]E\033[0m"
+	if out != want {
+		t.Errorf("ApplySelection single-line = %q, want %q", out, want)
+	}
+}
+
+// TestApplySelection_MultiLine covers selection that crosses a newline. Cells
+// 2,3 of line 1 ("bc") plus cell 1 of line 2 ("d").
+func TestApplySelection_MultiLine(t *testing.T) {
+	in := "abc\ndef"
+	out := ApplySelection(in, 1, 2, 2, 2)
+	want := "a[\"sel\"]bc[\"\"]\n[\"sel\"]d[\"\"]ef"
+	if out != want {
+		t.Errorf("ApplySelection multi-line = %q, want %q", out, want)
+	}
+}
+
+// TestApplySelection_Normalized ensures reversed start/end coordinates still
+// produce a valid (forward) selection.
+func TestApplySelection_Normalized(t *testing.T) {
+	in := "abcdef"
+	// Reversed: (1,5)..(1,3) should normalize to (1,3)..(1,5) → cells 3,4 → "cd".
+	out := ApplySelection(in, 1, 5, 1, 3)
+	want := "ab[\"sel\"]cd[\"\"]ef"
+	if out != want {
+		t.Errorf("ApplySelection reversed = %q, want %q", out, want)
+	}
+}
+
+// TestApplySelection_EmptyReturnsUnchanged guards against emitting empty
+// region tags when the range collapses to a single cell.
+func TestApplySelection_EmptyReturnsUnchanged(t *testing.T) {
+	in := "abcdef"
+	if got := ApplySelection(in, 1, 3, 1, 3); got != in {
+		t.Errorf("empty range modified text: %q", got)
+	}
+}
+
+// TestApplySelection_AcrossEscape proves escapes don't shift cell positions.
+// The escape sequence should not count toward the cell offset.
+func TestApplySelection_AcrossEscape(t *testing.T) {
+	// Line: ESC[31m foo ESC[0m bar  → visible cells: " foo  bar" (9 cells).
+	in := "\033[31m foo \033[0m bar"
+	// Select cells 2..6 → "foo " (with trailing space).
+	out := ApplySelection(in, 1, 2, 1, 6)
+	if !strings.Contains(out, `["sel"]`) {
+		t.Fatalf("no region tag: %q", out)
+	}
+	// Re-extract and verify what the user "selected".
+	got := ExtractSelection(in, 1, 2, 1, 6)
+	if StripANSI(got) != "foo " {
+		t.Errorf("ExtractSelection = %q (stripped %q), want %q", got, StripANSI(got), "foo ")
+	}
+}
+
+// TestExtractSelection_Plain is the symmetric counterpart of TestApplySelection.
+func TestExtractSelection_Plain(t *testing.T) {
+	in := "abc\ndef"
+	got := ExtractSelection(in, 1, 2, 2, 2)
+	want := "bc\nd"
+	if got != want {
+		t.Errorf("ExtractSelection = %q, want %q", got, want)
+	}
+}
+
+// TestExtractSelection_SingleLine mirrors TestApplySelection_SingleLine to make
+// sure the byte→cell→byte round-trip is lossless for an ANSI-padded line.
+func TestExtractSelection_SingleLine(t *testing.T) {
+	in := "\033[35mABCDE\033[0m"
+	got := ExtractSelection(in, 1, 2, 1, 5)
+	if got != "BCD" {
+		t.Errorf("ExtractSelection = %q, want %q", got, "BCD")
+	}
+}
