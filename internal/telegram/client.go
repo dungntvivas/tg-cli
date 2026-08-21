@@ -227,6 +227,12 @@ func (c *Client) History(ctx context.Context, peer Peer, limit int) ([]Message, 
 			out = append(out, c.messageFromGotd(ctx, mm, userByID, chatByID))
 		}
 	}
+	// Telegram returns messages newest-first (the first item is the most
+	// recent). Reverse to oldest-first so the chat view scrolls naturally:
+	// newest message at the bottom, matches how a chat is read.
+	for i, j := 0, len(out)-1; i < j; i, j = i+1, j-1 {
+		out[i], out[j] = out[j], out[i]
+	}
 	return out, nil
 }
 
