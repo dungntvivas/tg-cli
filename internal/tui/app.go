@@ -73,10 +73,17 @@ func (a *App) build(selfName string) {
 		SetBorderColor(muted)
 
 	// Input: framed box with cyan prompt label, full width (FieldWidth=0).
+	// tview's selectedStyle paints a PrimaryTextColor background when the
+	// field is focused, which on many terminals shows as a blue block. Pin
+	// both field and selection backgrounds to the terminal default so the
+	// input area stays transparent and matches the surrounding border.
 	a.input = tview.NewInputField().
 		SetLabel(" > ").
 		SetLabelColor(accent).
-		SetFieldWidth(0)
+		SetFieldWidth(0).
+		SetFieldBackgroundColor(tcell.ColorDefault).
+		SetFieldStyle(tcell.StyleDefault.Background(tcell.ColorDefault)).
+		SetLabelStyle(tcell.StyleDefault.Background(tcell.ColorDefault).Foreground(accent))
 	a.input.SetBorder(true).
 		SetTitle(" Message ").
 		SetTitleColor(accent).
