@@ -25,6 +25,11 @@ func New(ctx context.Context, appID int, apiHash, sessionFile string) (*Client, 
 	storage := &session.FileStorage{Path: sessionFile}
 	raw := telegram.NewClient(appID, apiHash, telegram.Options{
 		SessionStorage: storage,
+		// We do not need push updates; the TUI fetches history on demand.
+		// Disabling updates skips gotd's internal c.Self() "subscribe" call
+		// (see telegram.connect.runUntilRestart), which races with our own
+		// SelfName() and was observed to deadlock on the same auth key.
+		NoUpdates: true,
 		// OnConnectionState is called on every primary-conn state change.
 		// We log to stderr so we can see whether the gotd handshake is making
 		// progress when SelfName blocks — distinguishes "never connected" from
