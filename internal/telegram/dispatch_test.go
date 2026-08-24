@@ -196,3 +196,83 @@ func TestOnMessage_Replace(t *testing.T) {
 		t.Errorf("replacement handler not called: second=%d", second)
 	}
 }
+
+// TestDispatch_P2PIncoming_FallsBackToPeer is the regression test for the
+// "unknown sender" bug. In P2P chats Telegram often omits m.FromID because
+// the peer IS the sender — without the PeerID fallback, messageFromGotd
+// would have left the literal string "unknown" in the chat pane.
+func TestDispatch_P2PIncoming_FallsBackToPeer(t *testing.T) {
+	c := &Client{}
+	var got Message
+	c.OnMessage(func(m Message) { got = m })
+	_ = c.handleUpdate(context.Background(), &tg.Updates{
+		Users: []tg.UserClass{&tg.User{ID: 7, FirstName: "Alice"}},
+		Updates: []tg.UpdateClass{
+			&tg.UpdateNewMessage{
+				Message: &tg.Message{
+					ID:      42,
+					Message: "hi",
+					Date:    1700000000,
+					PeerID:  &tg.PeerUser{UserID: 7},
+					// FromID intentionally nil — P2P case.
+					Out: false,
+				},
+			},
+		},
+	})
+	if got.Sender != "Alice" {
+		t.Errorf("Sender = %q, want Alice (P2P must fall back to PeerID)", got.Sender)
+	}
+}
+
+// TestDispatch_P2PIncoming_NoBundleUsesUserFallback: when the Updates
+// container bundles no Users (rare but possible), the sender should still
+// resolve to "User <id>" rather than the literal string "unknown".
+func TestDispatch_P2PIncoming_NoBundleUsesUserFallback(t *testing.T) {
+	c := &Client{}
+	var got Message
+	c.OnMessage(func(m Message) { got = m })
+	_ = c.handleUpdate(context.Background(), &tg.Updates{
+		Updates: []tg.UpdateClass{
+			&tg.UpdateNewMessage{
+				Message: &tg.Message{
+					ID: 1, Message: "hi", Date: 1700000000,
+					PeerID: &tg.PeerUser{UserID: 99},
+					Out:    false,
+				},
+			},
+		},
+	})
+	if got.Sender == "unknown" {
+		t.Errorf("Sender = %q, must never be the placeholder 'unknown'", got.Sender)
+	}
+	if got.Sender != "User 99" {
+		t.Errorf("Sender = %q, want %q", got.Sender, "User 99")
+	}
+}
+
+// TestDispatch_GroupSender_UsesFromID: in group chats FromID is the actual
+// sender (different from PeerID which is the group itself). Sender must
+// resolve from FromID, not the chat's PeerID/Title.
+func TestDispatch_GroupSender_UsesFromID(t *testing.T) {
+	c := &Client{}
+	var got Message
+	c.OnMessage(func(m Message) { got = m })
+	_ = c.handleUpdate(context.Background(), &tg.Updates{
+		Users: []tg.UserClass{&tg.User{ID: 11, FirstName: "Bob"}},
+		Chats: []tg.ChatClass{&tg.Chat{ID: 500, Title: "Family"}},
+		Updates: []tg.UpdateClass{
+			&tg.UpdateNewMessage{
+				Message: &tg.Message{
+					ID: 1, Message: "hi all", Date: 1700000000,
+					PeerID: &tg.PeerChat{ChatID: 500},
+					FromID: &tg.PeerUser{UserID: 11},
+					Out:    false,
+				},
+			},
+		},
+	})
+	if got.Sender != "Bob" {
+		t.Errorf("Sender = %q, want Bob (group sender must come from FromID)", got.Sender)
+	}
+}

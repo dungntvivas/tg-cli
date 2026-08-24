@@ -268,7 +268,7 @@ func (c *Client) Dialogs(ctx context.Context) ([]Dialog, error) {
 
 // dialogFromGotd extracts our Dialog from a gotd Dialog (which only carries peer + last msg metadata).
 func (c *Client) dialogFromGotd(ctx context.Context, d tg.Dialog, users map[int64]*tg.User, chats map[int64]tg.ChatClass) (Dialog, error) {
-	title, err := c.peerTitle(ctx, d.Peer, users, chats)
+	title, err := peerTitle(ctx, d.Peer, users, chats)
 	if err != nil {
 		return Dialog{}, err
 	}
@@ -377,24 +377,65 @@ func (c *Client) History(ctx context.Context, peer Peer, limit int) ([]Message, 
 }
 
 func (c *Client) messageFromGotd(ctx context.Context, m *tg.Message, users map[int64]*tg.User, chats map[int64]tg.ChatClass) Message {
-	sender := "unknown"
-	if m.FromID != nil {
-		if title, _ := c.peerTitle(ctx, m.FromID, users, chats); title != "" {
-			sender = title
-		} else {
-			sender = fmt.Sprint(peerID(m.FromID))
+	if m.Out {
+		return Message{
+			ID:       int64(m.ID),
+			Sender:   "You",
+			Text:     m.Message,
+			Time:     time.Unix(int64(m.Date), 0),
+			Outgoing: true,
 		}
 	}
-	if m.Out {
-		sender = "You"
-	}
+	sender := c.resolveSender(ctx, m, users, chats)
 	return Message{
 		ID:       int64(m.ID),
 		Sender:   sender,
 		Text:     m.Message,
 		Time:     time.Unix(int64(m.Date), 0),
-		Outgoing: m.Out,
+		Outgoing: false,
 	}
+}
+
+// resolveSender turns a `tg.Message` into a display name. Tries the sender
+// in this order:
+//
+//  1. m.FromID — explicit sender (groups/channels always have it).
+//  2. m.PeerID — for P2P messages Telegram often omits FromID because the
+//     peer IS the sender; without this fallback we'd show "User <id>" or
+//     a literal "unknown" placeholder for incoming P2P chats.
+//  3. The bundled Users/Chats map first (cheap), then a final
+//     `"User <id>"` fallback so we never show a literal "unknown".
+func (c *Client) resolveSender(ctx context.Context, m *tg.Message, users map[int64]*tg.User, chats map[int64]tg.ChatClass) string {
+	if title, ok := resolvePeerTitle(ctx, m.FromID, users, chats); ok {
+		return title
+	}
+	if title, ok := resolvePeerTitle(ctx, m.PeerID, users, chats); ok {
+		return title
+	}
+	id := peerID(m.FromID)
+	if id == 0 {
+		id = peerID(m.PeerID)
+	}
+	if id == 0 {
+		return "User"
+	}
+	return fmt.Sprintf("User %d", id)
+}
+
+// resolvePeerTitle is a tiny wrapper around peerTitle that returns
+// (title, ok) so the caller can decide between this title and a fallback.
+// Returns ok=false for empty titles and lookup misses (peerType not in the
+// bundled map). Errors from peerTitle (unknown peer type) are swallowed —
+// the caller has its own fallback chain.
+func resolvePeerTitle(ctx context.Context, p tg.PeerClass, users map[int64]*tg.User, chats map[int64]tg.ChatClass) (string, bool) {
+	if p == nil {
+		return "", false
+	}
+	title, err := peerTitle(ctx, p, users, chats)
+	if err != nil || title == "" {
+		return "", false
+	}
+	return title, true
 }
 
 // Send posts `text` to `peer` and returns the echoed message. ID/PeerID/PeerKind
@@ -531,7 +572,7 @@ func peerKind(p tg.PeerClass) string {
 	}
 }
 
-func (c *Client) peerTitle(ctx context.Context, p tg.PeerClass, users map[int64]*tg.User, chats map[int64]tg.ChatClass) (string, error) {
+func peerTitle(ctx context.Context, p tg.PeerClass, users map[int64]*tg.User, chats map[int64]tg.ChatClass) (string, error) {
 	switch v := p.(type) {
 	case *tg.PeerUser:
 		user, ok := users[v.UserID]
