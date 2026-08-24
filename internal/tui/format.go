@@ -19,6 +19,20 @@ const senderColWidth = 10
 // body line (including continuations of the first message line).
 var blankCol = strings.Repeat(" ", senderColWidth)
 
+// Tview markup for the two colors we render. Kept here (not interpolated as
+// strings) so the format code reads naturally and so test asserts can refer
+// to them by name.
+//
+// Why markup, not raw ANSI: tview's TextView with SetDynamicColors(true)
+// only parses `[color]` tags. Raw `\x1b[36m` ANSI is silently dropped —
+// the ESC byte is eaten and `[36m` shows up as literal text in the chat
+// pane. Using tview's own markup avoids that footgun.
+const (
+	cyanMarkup    = "[cyan]"
+	magentaMarkup = "[magenta]"
+	resetMarkup   = "[-]"
+)
+
 // FormatMessage renders one message as a Slack-style thread block:
 // [sender column, senderColWidth cells] | [body, wraps to width-senderColWidth].
 // Continuation lines start with a blank sender column so the body column
@@ -30,9 +44,9 @@ var blankCol = strings.Repeat(" ", senderColWidth)
 // view has been laid out).
 func FormatMessage(msg telegram.Message, width int) string {
 	if msg.Outgoing {
-		return formatColored(msg, width, "\033[35m", "You")
+		return formatColored(msg, width, magentaMarkup, "You")
 	}
-	return formatColored(msg, width, "\033[36m", msg.Sender)
+	return formatColored(msg, width, cyanMarkup, msg.Sender)
 }
 
 // formatColored builds the block for one message with the given sender color.
@@ -40,8 +54,7 @@ func FormatMessage(msg telegram.Message, width int) string {
 // or split on user newlines) are indented by `blankCol` so they share the
 // same column as the first body line.
 func formatColored(msg telegram.Message, width int, senderColor, senderName string) string {
-	const reset = "\033[0m"
-	header := senderColor + senderColumn(senderName) + reset
+	header := senderColor + senderColumn(senderName) + resetMarkup
 	if width <= senderColWidth {
 		// No wrap before layout / on too-narrow panes. Emit header + raw body.
 		return header + "\n" + msg.Text
@@ -95,27 +108,118 @@ func truncateCells(s string, maxCells int) string {
 	return b.String()
 }
 
+// isTviewTagContent reports whether `s` (the body between `[` and `]`)
+// looks like a tview style/region tag, so callers know to skip the whole
+// tag without counting it toward display cells. Strict: a `[word]` in
+// chat body text is NOT a tag — only the specific shapes tview actually
+// parses are accepted:
+//
+//	- `-`             — reset
+//	- `cyan`, `red`…  — tview's short-form color/attr names (whitelisted)
+//	- `"region_id"`   — region tag (anything quoted)
+//	- `#rrggbb`       — hex color
+//	- `:red`, `::b`   — long-form attribute prefixes
+//	- `red,b`         — compound lists (comma/semicolon/colon separates)
+func isTviewTagContent(s string) bool {
+	if s == "-" {
+		return true
+	}
+	if len(s) == 0 {
+		return false
+	}
+	if s[0] == '"' {
+		return true
+	}
+	if s[0] == '#' {
+		if len(s) != 7 {
+			return false
+		}
+		for _, r := range s[1:] {
+			if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+				return false
+			}
+		}
+		return true
+	}
+	if s[0] == ':' {
+		return true
+	}
+	// Compound attribute lists always carry a separator.
+	if strings.ContainsAny(s, ":,;") {
+		return true
+	}
+	return tviewShortNames[s]
+}
+
+// tviewShortNames is the whitelist of short-form tags tview actually parses
+// (basic ANSI colors, their light/dark variants, and attribute toggles).
+// Anything else in `[...]` is treated as visible chat text and left alone —
+// otherwise we'd silently eat user-typed `[lol]` or `[citation needed]`.
+//
+// ponytail: this list is deliberately narrow; add new colors here if we
+// ever need them, but don't loosen the heuristic — user content beats
+// heuristic strip.
+var tviewShortNames = map[string]bool{
+	// foreground colors
+	"black": true, "red": true, "green": true, "yellow": true,
+	"blue": true, "magenta": true, "cyan": true, "white": true,
+	"darkgray": true, "darkgrey": true,
+	"lightred": true, "lightgreen": true, "lightyellow": true,
+	"lightblue": true, "lightmagenta": true, "lightcyan": true,
+	"lightgray": true, "lightgrey": true,
+	"default": true,
+	// attribute toggles
+	"b": true, "u": true, "i": true, "s": true,
+	"l": true, "d": true, "r": true, "f": true, "v": true,
+}
+
+// skipTviewTag consumes the `[…]` at the start of `s`. Returns the remainder
+// after the closing `]`. Returns `s` unchanged if the bytes don't form a
+// tag. The caller is responsible for having already consumed the opening
+// `[` — `s` here is what comes AFTER the `[`.
+func skipTviewTag(s string) string {
+	closeIdx := strings.Index(s, "]")
+	if closeIdx <= 0 || closeIdx > 32 {
+		return s
+	}
+	if !isTviewTagContent(s[:closeIdx]) {
+		return s
+	}
+	return s[closeIdx+1:]
+}
+
 // displayWidth returns the number of terminal cells `s` occupies, ignoring
-// ANSI CSI escape sequences (ESC[...m / ESC[K). Wide grapheme clusters
-// (CJK, emoji) and combining marks are counted via uniseg so the result
-// matches what the terminal actually renders.
+// both ANSI CSI escape sequences (ESC ... m/K) and tview style/region
+// markup ([color], [-], ["region"]). Wide grapheme clusters (CJK, emoji)
+// and combining marks are counted via uniseg so the result matches what
+// the terminal actually renders.
 func displayWidth(s string) int {
 	w := 0
 	state := -1
 	esc := false
-	for len(s) > 0 {
+	rest := s
+	for len(rest) > 0 {
 		var cluster string
-		cluster, s, _, state = uniseg.FirstGraphemeClusterInString(s, state)
-		if !esc && len(cluster) > 0 && cluster[0] == 0x1b {
-			esc = true
-			continue
-		}
+		cluster, rest, _, state = uniseg.FirstGraphemeClusterInString(rest, state)
 		if esc {
 			// Sequence ends on the cluster containing 'm' (SGR) or 'K' (EL).
 			if strings.ContainsAny(cluster, "mK") {
 				esc = false
 			}
 			continue
+		}
+		if len(cluster) > 0 && cluster[0] == 0x1b {
+			esc = true
+			continue
+		}
+		if cluster == "[" {
+			// Try to consume a full tview tag in one shot so we don't have
+			// to track partial-tag state across iterations.
+			after := skipTviewTag(rest)
+			if after != rest {
+				rest = after
+				continue
+			}
 		}
 		w += uniseg.StringWidth(cluster)
 	}
@@ -131,24 +235,36 @@ func rightPad(s string, width int) string {
 	return strings.Repeat(" ", pad) + s
 }
 
-// StripANSI removes ANSI CSI escape sequences (ESC ... m/K) from `s`, leaving
-// plain text. Used to clean chat text before copying to the clipboard.
+// StripANSI removes both ANSI CSI escape sequences (ESC ... m/K) AND tview
+// style/region markup ([color], [-], ["region"]) from `s`, leaving plain
+// text. Used to clean chat text before copying to the clipboard.
+//
+// Kept named StripANSI for API stability — it strips more than ANSI now,
+// but the surface (one call → plain text) didn't change.
 func StripANSI(s string) string {
 	var b strings.Builder
 	state := -1
 	esc := false
-	for len(s) > 0 {
+	rest := s
+	for len(rest) > 0 {
 		var cluster string
-		cluster, s, _, state = uniseg.FirstGraphemeClusterInString(s, state)
-		if !esc && len(cluster) > 0 && cluster[0] == 0x1b {
-			esc = true
-			continue
-		}
+		cluster, rest, _, state = uniseg.FirstGraphemeClusterInString(rest, state)
 		if esc {
 			if strings.ContainsAny(cluster, "mK") {
 				esc = false
 			}
 			continue
+		}
+		if len(cluster) > 0 && cluster[0] == 0x1b {
+			esc = true
+			continue
+		}
+		if cluster == "[" {
+			after := skipTviewTag(rest)
+			if after != rest {
+				rest = after
+				continue
+			}
 		}
 		b.WriteString(cluster)
 	}
@@ -162,9 +278,9 @@ const selectionRegionTag = "sel"
 
 // ApplySelection wraps the cell range [sLine,sCol]..[eLine,eCol] (1-based,
 // inclusive) in tview region tags so Highlight can paint it. Coordinates are
-// in display cells (not bytes), so ANSI escape sequences don't shift them.
-// If the range is empty (start >= end) or out of bounds, the text is returned
-// unchanged.
+// in display cells (not bytes), so ANSI escapes and tview markup don't shift
+// them. If the range is empty (start >= end) or out of bounds, the text is
+// returned unchanged.
 func ApplySelection(text string, sLine, sCol, eLine, eCol int) string {
 	lines := strings.Split(text, "\n")
 	if len(lines) == 0 {
@@ -210,8 +326,9 @@ func ApplySelection(text string, sLine, sCol, eLine, eCol int) string {
 }
 
 // wrapLineRangeWithRegion inserts `["sel"]...[""]` around the [fromCell, toCell)
-// cell range in `line`. ANSI escapes inside the line are skipped during the
-// cell count so the region aligns with what the terminal actually renders.
+// cell range in `line`. ANSI escapes and tview markup inside the line are
+// skipped during the cell count so the region aligns with what the terminal
+// actually renders.
 func wrapLineRangeWithRegion(line string, fromCell, toCell int) string {
 	startByte, endByte := cellRangeToBytes(line, fromCell, toCell)
 	if startByte < 0 || endByte < 0 || endByte <= startByte {
@@ -227,7 +344,7 @@ func wrapLineRangeWithRegion(line string, fromCell, toCell int) string {
 }
 
 // cellRangeToBytes returns the byte offsets [start, end) that cover the
-// [fromCell, toCell) cell range in `line`. Returns (-1, -1) if either bound
+// [fromCell, toCell) cell range in `line. Returns (-1, -1) if either bound
 // can't be resolved (e.g. past end of line).
 func cellRangeToBytes(line string, fromCell, toCell int) (int, int) {
 	state := -1
@@ -241,15 +358,27 @@ func cellRangeToBytes(line string, fromCell, toCell int) (int, int) {
 		var cluster string
 		var w int
 		cluster, rest, w, state = uniseg.FirstGraphemeClusterInString(rest, state)
-		if !esc && len(cluster) > 0 && cluster[0] == 0x1b {
-			esc = true
-			continue
-		}
 		if esc {
 			if strings.ContainsAny(cluster, "mK") {
 				esc = false
 			}
 			continue
+		}
+		if len(cluster) > 0 && cluster[0] == 0x1b {
+			esc = true
+			continue
+		}
+		if cluster == "[" {
+			after := skipTviewTag(rest)
+			if after != rest {
+				rest = after
+				// The `[` byte lives where `cluster` came from; the tag
+				// itself doesn't add cells, so cell/w stay unchanged. Skip
+				// updating byte offsets — the tag isn't visible, so any
+				// selection that would have landed inside the tag is
+				// invalid and falls through to the next visible byte.
+				continue
+			}
 		}
 		clusterStart := len(original) - len(rest) - len(cluster)
 		if startByte < 0 && cell >= fromCell {
@@ -271,8 +400,9 @@ func cellRangeToBytes(line string, fromCell, toCell int) (int, int) {
 }
 
 // ExtractSelection returns the cell-accurate substring of `text` covered by the
-// [sLine,sCol]..[eLine,eCol] range, with ANSI escapes preserved. Use
-// StripANSI on the result to get a plain-text copy for the clipboard.
+// [sLine,sCol]..[eLine,eCol] range, with both ANSI escapes and tview markup
+// preserved. Use StripANSI on the result to get a plain-text copy for the
+// clipboard.
 func ExtractSelection(text string, sLine, sCol, eLine, eCol int) string {
 	lines := strings.Split(text, "\n")
 	if len(lines) == 0 {
@@ -317,10 +447,11 @@ func ExtractSelection(text string, sLine, sCol, eLine, eCol int) string {
 	return strings.Join(parts, "\n")
 }
 
-// wrapGraphemes splits `s` so each piece is at most `width` cells wide. ANSI
-// escapes are preserved but don't count toward the width. Wrapping iterates
-// grapheme clusters (so emoji and combining marks stay intact) and breaks at
-// cluster boundaries — no mid-cluster splits, no byte-boundary UTF-8 breaks.
+// wrapGraphemes splits `s` so each piece is at most `width` cells wide.
+// ANSI escapes and tview markup are preserved in the output but don't count
+// toward the width. Wrapping iterates grapheme clusters (so emoji and
+// combining marks stay intact) and breaks at cluster boundaries — no
+// mid-cluster splits, no byte-boundary UTF-8 breaks.
 func wrapGraphemes(s string, width int) []string {
 	if width <= 0 || displayWidth(s) <= width {
 		return []string{s}
@@ -347,6 +478,17 @@ func wrapGraphemes(s string, width int) []string {
 				esc = false
 			}
 			continue
+		}
+		if cluster == "[" {
+			// Preserve tview tags verbatim; consume them before deciding
+			// whether the next visible cluster would overflow.
+			closeIdx := strings.Index(rest, "]")
+			if closeIdx > 0 && closeIdx <= 32 && isTviewTagContent(rest[:closeIdx]) {
+				cur.WriteByte('[')
+				cur.WriteString(rest[:closeIdx+1])
+				rest = rest[closeIdx+1:]
+				continue
+			}
 		}
 		// Flush when adding this cluster would overflow. Allow a single
 		// cluster wider than `width` (e.g. an emoji at width=1) by breaking

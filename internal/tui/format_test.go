@@ -201,17 +201,71 @@ func TestFormatMessage_ContinuationAlignedToBody(t *testing.T) {
 
 // TestFormatMessage_OutgoingUsesAccentColor: outgoing "You" must be colored
 // magenta so the user's own messages stand out in the thread without
-// changing the alignment.
+// changing the alignment. Uses tview markup — SetDynamicColors(true) doesn't
+// parse raw ANSI escapes; an unparsed ESC byte leaves "[35m" as literal text.
 func TestFormatMessage_OutgoingUsesAccentColor(t *testing.T) {
 	got := FormatMessage(telegram.Message{Sender: "You", Text: "x", Outgoing: true}, 40)
-	if !strings.Contains(got, "\033[35m") {
-		t.Errorf("outgoing sender should use magenta (35), got %q", got)
+	if !strings.Contains(got, "[magenta]") {
+		t.Errorf("outgoing sender should use [magenta] markup, got %q", got)
+	}
+	if strings.Contains(got, "\033[35m") {
+		t.Errorf("raw ANSI must not be emitted (tview would show literal [35m): %q", got)
+	}
+}
+
+// TestFormatMessage_NoLiteralAnsiLeak guards the bug we just fixed: even
+// though we never emit raw ANSI, defense in depth — if someone reintroduces
+// it (e.g. via a stray fmt.Sprintf("\x1b[%dm")), this catches it.
+func TestFormatMessage_NoLiteralAnsiLeak(t *testing.T) {
+	for _, m := range []telegram.Message{
+		{Sender: "Alice", Text: "hi"},
+		{Sender: "You", Text: "hi", Outgoing: true},
+		{Sender: "LongSender", Text: "x"},
+	} {
+		got := FormatMessage(m, 60)
+		if strings.Contains(got, "\x1b[") {
+			t.Errorf("FormatMessage emitted raw ANSI escape: %q", got)
+		}
 	}
 }
 
 func TestDisplayWidth_IgnoresEscapes(t *testing.T) {
 	if got := displayWidth("\033[35mhello\033[0m"); got != 5 {
 		t.Errorf("displayWidth = %d, want 5", got)
+	}
+}
+
+// TestDisplayWidth_IgnoresTviewMarkup proves the switch from raw ANSI to
+// tview markup didn't change cell counts — markup like `[cyan]` must count
+// as 0 cells just like the CSI sequences it replaces.
+func TestDisplayWidth_IgnoresTviewMarkup(t *testing.T) {
+	cases := []struct {
+		in   string
+		want int
+	}{
+		{"[cyan]hello[-]", 5},
+		{"[magenta]You[-]", 3},
+		{"[#ff0000]hi[-]", 2},
+		{`["sel"]hi[""]`, 2},
+		{"plain", 5},
+	}
+	for _, c := range cases {
+		if got := displayWidth(c.in); got != c.want {
+			t.Errorf("displayWidth(%q) = %d, want %d", c.in, got, c.want)
+		}
+	}
+}
+
+// TestDisplayWidth_LiteralBracketNotMisread: a real `[` in chat content
+// (followed by non-tag chars) must count as a visible character, not be
+// eaten as markup. Guards against over-eager tag detection.
+func TestDisplayWidth_LiteralBracketNotMisread(t *testing.T) {
+	if got := displayWidth("[abc]"); got != 5 {
+		t.Errorf("displayWidth(\"[abc]\") = %d, want 5 (all visible)", got)
+	}
+	// Reset marker alone — exactly the format.go resetMarkup shape.
+	if got := displayWidth("[-]"); got != 0 {
+		t.Errorf("displayWidth(\"[-]\") = %d, want 0 (reset tag has no width)", got)
 	}
 }
 
@@ -262,6 +316,12 @@ func TestStripANSI(t *testing.T) {
 		{"\033[1;31mbold red\033[0m normal", "bold red normal"},
 		{"", ""},
 		{"\033[K", ""},
+		// Tview markup — same function now strips both so callers don't
+		// have to chain cleanup calls before clipboard copy.
+		{"[cyan]hello[-]", "hello"},
+		{"[magenta]You[-] [cyan]Alice[-]", "You Alice"},
+		{`["sel"]BCD[""]`, "BCD"},
+		{"[#ff0000]hi[-] plain", "hi plain"},
 	}
 	for _, c := range cases {
 		if got := StripANSI(c.in); got != c.want {
@@ -351,5 +411,56 @@ func TestExtractSelection_SingleLine(t *testing.T) {
 	got := ExtractSelection(in, 1, 2, 1, 5)
 	if got != "BCD" {
 		t.Errorf("ExtractSelection = %q, want %q", got, "BCD")
+	}
+}
+
+// TestApplySelection_WithTviewMarkup is the markup counterpart of
+// TestApplySelection_SingleLine: input has [magenta]…[-] around the text
+// instead of raw ANSI. The region must wrap cells 2-4 ("BCD") and the
+// markup bytes must stay OUTSIDE the region so the highlight is exactly
+// on the visible glyphs.
+func TestApplySelection_WithTviewMarkup(t *testing.T) {
+	in := "[magenta]ABCDE[-]"
+	out := ApplySelection(in, 1, 2, 1, 5)
+	want := "[magenta]A[\"sel\"]BCD[\"\"]E[-]"
+	if out != want {
+		t.Errorf("ApplySelection markup = %q, want %q", out, want)
+	}
+	// Round-trip: extract the selected substring and confirm it strips
+	// back to the visible "BCD" with no markup/ANSI leakage.
+	extracted := StripANSI(ExtractSelection(in, 1, 2, 1, 5))
+	if extracted != "BCD" {
+		t.Errorf("ExtractSelection stripped = %q, want %q", extracted, "BCD")
+	}
+}
+
+// TestWrapGraphemes_PreservesMarkup: wrap must keep tview markup on the
+// line where it started (don't break a tag across two wrapped lines) AND
+// not count it toward the wrap width.
+func TestWrapGraphemes_PreservesMarkup(t *testing.T) {
+	// 20 visible chars, width 10 → 2 wrapped lines. Markup must not count
+	// toward the wrap width (otherwise it would force an early break).
+	in := "[magenta]" + strings.Repeat("a", 20) + "[-]"
+	got := wrapGraphemes(in, 10)
+	if len(got) < 2 {
+		t.Fatalf("expected >= 2 lines, got %d: %v", len(got), got)
+	}
+	// Markup is preserved somewhere — exact line is undefined (depends on
+	// which cluster crosses the break).
+	if !strings.Contains(got[0]+ strings.Join(got[1:], ""), "[magenta]") {
+		t.Errorf("color opener lost across wrap: %v", got)
+	}
+	if !strings.Contains(got[0]+ strings.Join(got[1:], ""), "[-]") {
+		t.Errorf("reset lost across wrap: %v", got)
+	}
+	// Joined output must equal input — wrap must not duplicate or drop anything.
+	if joined := strings.Join(got, ""); joined != in {
+		t.Errorf("wrap changed content: got %q, want %q", joined, in)
+	}
+	// And no wrapped line exceeded the width (markup chars must not count).
+	for i, line := range got {
+		if w := displayWidth(line); w > 10 {
+			t.Errorf("line %d width = %d, want <= 10 (markup leaked into count): %q", i, w, line)
+		}
 	}
 }
