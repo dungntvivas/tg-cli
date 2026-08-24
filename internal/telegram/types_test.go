@@ -77,3 +77,42 @@ func TestFakeAPI_ErrorPropagates(t *testing.T) {
 		t.Errorf("got %v, want %v", err, wantErr)
 	}
 }
+
+func TestFakeAPI_MarkRead(t *testing.T) {
+	want := Peer{ID: 42, Kind: "user"}
+	var got Peer
+	calls := 0
+	api := &FakeAPI{
+		MarkReadFn: func(ctx context.Context, peer Peer) error {
+			calls++
+			got = peer
+			return nil
+		},
+	}
+	if err := api.MarkRead(context.Background(), want); err != nil {
+		t.Fatalf("MarkRead: %v", err)
+	}
+	if calls != 1 {
+		t.Errorf("MarkReadFn calls = %d, want 1", calls)
+	}
+	if got != want {
+		t.Errorf("peer = %+v, want %+v", got, want)
+	}
+}
+
+func TestFakeAPI_MarkRead_NoOpWhenNil(t *testing.T) {
+	api := &FakeAPI{}
+	if err := api.MarkRead(context.Background(), Peer{}); err != nil {
+		t.Errorf("nil MarkReadFn should be a no-op, got %v", err)
+	}
+}
+
+func TestFakeAPI_MarkRead_PropagatesError(t *testing.T) {
+	wantErr := errors.New("rate limited")
+	api := &FakeAPI{
+		MarkReadFn: func(ctx context.Context, peer Peer) error { return wantErr },
+	}
+	if err := api.MarkRead(context.Background(), Peer{}); err != wantErr {
+		t.Errorf("got %v, want %v", err, wantErr)
+	}
+}

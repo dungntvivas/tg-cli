@@ -445,6 +445,24 @@ func (c *Client) Send(ctx context.Context, peer Peer, text string) (Message, err
 	return echo(0), nil
 }
 
+// MarkRead notifies Telegram that all messages in `peer` have been read.
+// MaxID=0 per the TL schema means "no upper bound" — i.e. everything.
+// TUI calls this when the user opens a dialog so the unread badge clears.
+func (c *Client) MarkRead(ctx context.Context, peer Peer) error {
+	inputPeer, err := c.inputPeer(peer)
+	if err != nil {
+		return err
+	}
+	_, err = c.raw.API().MessagesReadHistory(ctx, &tg.MessagesReadHistoryRequest{
+		Peer:   inputPeer,
+		MaxID:  0,
+	})
+	if err != nil {
+		return fmt.Errorf("mark read: %w", err)
+	}
+	return nil
+}
+
 func (c *Client) inputPeer(p Peer) (tg.InputPeerClass, error) {
 	switch p.Kind {
 	case "user":

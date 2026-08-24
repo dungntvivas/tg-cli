@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
@@ -126,5 +127,84 @@ func TestRefreshDialogs_PreservesActiveIdx(t *testing.T) {
 	}
 	if a.sidebar.GetCurrentItem() != 0 {
 		t.Errorf("sidebar current = %d, want 0", a.sidebar.GetCurrentItem())
+	}
+}
+
+// TestLoadHistory_CallsMarkReadAndRefreshesDialogs verifies opening a dialog
+// triggers MarkRead (so the server's unread badge clears) AND refreshes the
+// sidebar so the cached dialog list reflects the cleared unread state.
+func TestLoadHistory_CallsMarkReadAndRefreshesDialogs(t *testing.T) {
+	dialogs := []telegram.Dialog{
+		{ID: 7, Kind: "user", Title: "Alice", Unread: 5},
+	}
+	historyCalls := 0
+	markReadCalls := 0
+	dialogsCalls := 0
+	var markedPeer telegram.Peer
+	api := &telegram.FakeAPI{
+		HistoryFn: func(ctx context.Context, peer telegram.Peer, limit int) ([]telegram.Message, error) {
+			historyCalls++
+			return []telegram.Message{{ID: 100, PeerID: 7, PeerKind: "user", Text: "hi"}}, nil
+		},
+		MarkReadFn: func(ctx context.Context, peer telegram.Peer) error {
+			markReadCalls++
+			markedPeer = peer
+			return nil
+		},
+		DialogsFn: func(ctx context.Context) ([]telegram.Dialog, error) {
+			dialogsCalls++
+			return dialogs, nil
+		},
+	}
+	a := &App{
+		chat:    tview.NewTextView(),
+		sidebar: tview.NewList(),
+		api:     api,
+		ctx:     context.Background(),
+		dialogs: dialogs,
+		activeIdx: 0,
+	}
+	a.loadHistory(50)
+	if historyCalls != 1 {
+		t.Errorf("History calls = %d, want 1", historyCalls)
+	}
+	if markReadCalls != 1 {
+		t.Errorf("MarkRead calls = %d, want 1", markReadCalls)
+	}
+	if markedPeer.ID != 7 || markedPeer.Kind != "user" {
+		t.Errorf("MarkRead peer = %+v, want {ID:7, Kind:user}", markedPeer)
+	}
+	if dialogsCalls < 1 {
+		// refreshDialogs is what fetches the post-read dialog list. Called
+		// at least once at the end of loadHistory.
+		t.Errorf("Dialogs calls = %d, want >= 1 (refresh after mark-read)", dialogsCalls)
+	}
+}
+
+// TestLoadHistory_MarkReadFailureDoesNotBlockUI verifies a mark-read failure
+// (e.g. transient network) surfaces as a toast but doesn't stop the chat
+// from rendering.
+func TestLoadHistory_MarkReadFailureDoesNotBlockUI(t *testing.T) {
+	dialogs := []telegram.Dialog{{ID: 7, Kind: "user", Title: "Alice"}}
+	api := &telegram.FakeAPI{
+		HistoryFn: func(ctx context.Context, peer telegram.Peer, limit int) ([]telegram.Message, error) {
+			return []telegram.Message{{ID: 1, PeerID: 7, PeerKind: "user", Text: "hi"}}, nil
+		},
+		MarkReadFn: func(ctx context.Context, peer telegram.Peer) error {
+			return errors.New("rate limited")
+		},
+	}
+	a := &App{
+		chat:    tview.NewTextView(),
+		sidebar: tview.NewList(),
+		status:  tview.NewTextView(),
+		api:     api,
+		ctx:     context.Background(),
+		dialogs: dialogs,
+		activeIdx: 0,
+	}
+	a.loadHistory(50)
+	if len(a.messages) != 1 {
+		t.Errorf("messages = %+v, want 1 entry (mark-read failure should not block UI)", a.messages)
 	}
 }

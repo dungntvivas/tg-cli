@@ -46,6 +46,9 @@ type API interface {
 	Dialogs(ctx context.Context) ([]Dialog, error)
 	History(ctx context.Context, peer Peer, limit int) ([]Message, error)
 	Send(ctx context.Context, peer Peer, text string) (Message, error)
+	// MarkRead notifies the server that all messages in `peer` are read.
+	// TUI calls this when opening a dialog so the unread badge clears.
+	MarkRead(ctx context.Context, peer Peer) error
 	// OnMessage registers a callback fired for each newly-received message.
 	// Multiple calls replace the previous handler. The handler is called from
 	// gotd's update goroutine — implementations must not block.
@@ -57,6 +60,7 @@ type FakeAPI struct {
 	DialogsFn   func(ctx context.Context) ([]Dialog, error)
 	HistoryFn   func(ctx context.Context, peer Peer, limit int) ([]Message, error)
 	SendFn      func(ctx context.Context, peer Peer, text string) (Message, error)
+	MarkReadFn  func(ctx context.Context, peer Peer) error
 	OnMessageFn func(handler func(Message))
 }
 
@@ -79,6 +83,13 @@ func (f *FakeAPI) Send(ctx context.Context, peer Peer, text string) (Message, er
 		return Message{}, nil
 	}
 	return f.SendFn(ctx, peer, text)
+}
+
+func (f *FakeAPI) MarkRead(ctx context.Context, peer Peer) error {
+	if f.MarkReadFn == nil {
+		return nil
+	}
+	return f.MarkReadFn(ctx, peer)
 }
 
 func (f *FakeAPI) OnMessage(handler func(Message)) {

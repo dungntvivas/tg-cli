@@ -434,6 +434,14 @@ func (a *App) loadHistory(limit int) {
 	// so opening a chat or sending a message auto-scrolls to the bottom
 	// (matches how chat UIs behave).
 	a.chat.ScrollToEnd()
+	// Tell the server we've seen this dialog so the unread badge clears.
+	// Failure is non-fatal — the chat still works, the badge just lingers
+	// until the next refreshDialogs picks up the server-side state.
+	if err := a.api.MarkRead(a.ctx, peer); err != nil {
+		a.toast(fmt.Sprintf("mark-read failed: %v", err))
+		return
+	}
+	a.refreshDialogs()
 }
 
 func (a *App) sendMessage(text string) {
