@@ -2,7 +2,6 @@
 package tui
 
 import (
-	"fmt"
 	"strings"
 
 	"github.com/rivo/uniseg"
@@ -10,59 +9,90 @@ import (
 	"github.com/user/tgchat/internal/telegram"
 )
 
-// FormatMessage renders one message as a small block.
+// senderColWidth is the fixed width of the sender-name column in display
+// cells. Slack-style thread: every message's first line is exactly this
+// wide; subsequent lines start with `blankCol` spaces so the body column
+// stays aligned across the whole thread.
+const senderColWidth = 10
+
+// blankCol is `senderColWidth` spaces — the leading indent used for every
+// body line (including continuations of the first message line).
+var blankCol = strings.Repeat(" ", senderColWidth)
+
+// FormatMessage renders one message as a Slack-style thread block:
+// [sender column, senderColWidth cells] | [body, wraps to width-senderColWidth].
+// Continuation lines start with a blank sender column so the body column
+// stays vertically aligned. Incoming sender names are cyan; "You" for
+// outgoing is magenta so the user's own messages pop in the thread.
 //
-// Incoming messages are left-aligned (no padding). Outgoing messages are
-// right-aligned within `width` columns: long lines are pre-wrapped so each
-// visible line stays flush against the right edge.
-//
-// `width` is the chat pane's drawable width (rect width minus border). It is
-// ignored for incoming messages. A non-positive `width` skips wrapping and
-// padding (safe fallback when the view hasn't been laid out yet).
+// `width` is the chat pane's drawable width (rect width minus border). A
+// non-positive `width` skips wrapping and padding (safe fallback before the
+// view has been laid out).
 func FormatMessage(msg telegram.Message, width int) string {
 	if msg.Outgoing {
-		return formatOutgoing(msg, width)
+		return formatColored(msg, width, "\033[35m", "You")
 	}
-	return formatIncoming(msg)
+	return formatColored(msg, width, "\033[36m", msg.Sender)
 }
 
-func formatIncoming(msg telegram.Message) string {
-	const senderColor = "\033[36m" // cyan
+// formatColored builds the block for one message with the given sender color.
+// The sender name is rendered in a fixed-width column; body lines (wrapped
+// or split on user newlines) are indented by `blankCol` so they share the
+// same column as the first body line.
+func formatColored(msg telegram.Message, width int, senderColor, senderName string) string {
 	const reset = "\033[0m"
-	header := fmt.Sprintf("%s%s%s", senderColor, msg.Sender, reset)
-	indent := "  "
-	body := indent + strings.ReplaceAll(msg.Text, "\n", "\n"+indent)
-	return header + "\n" + body
-}
-
-// formatOutgoing renders outgoing text with each visible line right-aligned in
-// `width` columns. The "› You" header is one line; the body may span multiple
-// pre-wrapped lines. Each user-supplied newline starts a new wrapped segment
-// (hard break), so wrapping never splits across user lines.
-func formatOutgoing(msg telegram.Message, width int) string {
-	const youColor = "\033[35m"  // magenta
-	const bodyColor = "\033[37m" // light gray
-	const reset = "\033[0m"
-	const indent = "  "
-
-	header := "› You"
-	if width > 0 {
-		header = youColor + rightPad(header, width) + reset
-	} else {
-		header = youColor + header + reset
+	header := senderColor + senderColumn(senderName) + reset
+	if width <= senderColWidth {
+		// No wrap before layout / on too-narrow panes. Emit header + raw body.
+		return header + "\n" + msg.Text
 	}
-
-	bodyRaw := indent + strings.ReplaceAll(msg.Text, "\n", "\n"+indent)
-	if width <= 0 {
-		return header + "\n" + bodyColor + bodyRaw + reset
-	}
+	bodyW := width - senderColWidth
 	var lines []string
-	for _, seg := range strings.Split(bodyRaw, "\n") {
-		for _, w := range wrapGraphemes(seg, width) {
-			lines = append(lines, bodyColor+rightPad(w, width)+reset)
+	for _, seg := range strings.Split(msg.Text, "\n") {
+		// User \n is a hard break — wrap each segment independently.
+		for _, w := range wrapGraphemes(seg, bodyW) {
+			lines = append(lines, blankCol+w)
 		}
 	}
 	return header + "\n" + strings.Join(lines, "\n")
+}
+
+// senderColumn returns `name` formatted to exactly `senderColWidth` display
+// cells, with a trailing space: shorter names are right-padded to `width-1`
+// cells, longer names are truncated to `width-2` cells + ellipsis (U+2026) +
+// space. Truncation is cell-aware (CJK / emoji stay intact).
+func senderColumn(name string) string {
+	const ellipsis = "…"
+	w := displayWidth(name)
+	if w <= senderColWidth-2 {
+		// Fits with ellipsis-free room: right-pad to width-1 + 1 space.
+		return rightPad(name, senderColWidth-1) + " "
+	}
+	// Overflow: truncate to width-2 cells + ellipsis + space.
+	return truncateCells(name, senderColWidth-2) + ellipsis + " "
+}
+
+// truncateCells returns the longest cell-aligned prefix of `s` that fits in
+// `maxCells` display cells. Pure-prefix: never cuts a grapheme mid-cluster.
+func truncateCells(s string, maxCells int) string {
+	if maxCells <= 0 {
+		return ""
+	}
+	var b strings.Builder
+	used := 0
+	state := -1
+	rest := s
+	for len(rest) > 0 {
+		var cluster string
+		var w int
+		cluster, rest, w, state = uniseg.FirstGraphemeClusterInString(rest, state)
+		if used+w > maxCells {
+			break
+		}
+		b.WriteString(cluster)
+		used += w
+	}
+	return b.String()
 }
 
 // displayWidth returns the number of terminal cells `s` occupies, ignoring

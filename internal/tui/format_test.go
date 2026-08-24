@@ -25,8 +25,15 @@ func TestFormatMessage_Outgoing(t *testing.T) {
 	if strings.Contains(got, "10:25") {
 		t.Errorf("outgoing should not render timestamp: %q", got)
 	}
-	if !strings.HasPrefix(strings.TrimSpace(stripANSI(got)), "›") {
-		t.Errorf("outgoing should start with '›' marker, got %q", got)
+	lines := strings.Split(got, "\n")
+	if len(lines) < 2 {
+		t.Fatalf("expected header + body line, got %d: %q", len(lines), got)
+	}
+	if w := displayWidth(stripANSI(lines[0])); w != senderColWidth {
+		t.Errorf("sender column width = %d, want %d, line=%q", w, senderColWidth, lines[0])
+	}
+	if w := displayWidth(stripANSI(lines[1])); w != senderColWidth+len("hello") {
+		t.Errorf("body line width = %d, want %d, line=%q", w, senderColWidth+len("hello"), lines[1])
 	}
 }
 
@@ -37,14 +44,18 @@ func TestFormatMessage_Incoming(t *testing.T) {
 		Time:   time.Date(2026, 8, 21, 10, 23, 0, 0, time.UTC),
 	}
 	got := FormatMessage(m, 80)
-	if strings.HasPrefix(strings.TrimSpace(got), "›") {
-		t.Errorf("incoming should not start with '›', got %q", got)
-	}
 	if !strings.Contains(got, "Alice") || !strings.Contains(got, "hey") {
 		t.Errorf("missing fields: %q", got)
 	}
 	if strings.Contains(got, "10:23") {
 		t.Errorf("incoming should not render timestamp: %q", got)
+	}
+	lines := strings.Split(got, "\n")
+	if len(lines) < 2 {
+		t.Fatalf("expected header + body line, got %d: %q", len(lines), got)
+	}
+	if w := displayWidth(stripANSI(lines[0])); w != senderColWidth {
+		t.Errorf("sender column width = %d, want %d, line=%q", w, senderColWidth, lines[0])
 	}
 }
 
@@ -70,38 +81,30 @@ func TestFormatMessage_EmptyText(t *testing.T) {
 	}
 }
 
-func TestFormatMessage_OutgoingRightAligned(t *testing.T) {
-	m := telegram.Message{
-		Sender: "You", Text: "hi", Outgoing: true,
-		Time: time.Now(),
-	}
-	const width = 20
-	got := FormatMessage(m, width)
-	for _, line := range strings.Split(got, "\n") {
-		if displayWidth(line) != width {
-			t.Errorf("outgoing line not right-aligned: visible=%d, want=%d, line=%q",
-				displayWidth(line), width, line)
-		}
-	}
-}
-
+// TestFormatMessage_OutgoingLongLineWraps: a 50-char body in a 20-cell
+// pane (sender col=10, body wraps at 10) → header line + 5 body lines.
+// Header line is 10 cells; body lines are blank-col + 10 cells = 20 cells
+// (matches the pane width).
 func TestFormatMessage_OutgoingLongLineWraps(t *testing.T) {
 	m := telegram.Message{
-		Sender:    "You",
-		Text:      strings.Repeat("x", 50),
-		Outgoing:  true,
-		Time:      time.Now(),
+		Sender:   "You",
+		Text:     strings.Repeat("x", 50),
+		Outgoing: true,
+		Time:     time.Now(),
 	}
 	const width = 20
 	got := FormatMessage(m, width)
 	lines := strings.Split(got, "\n")
-	if len(lines) < 3 {
-		t.Fatalf("expected header + at least 2 wrapped lines, got %d: %q", len(lines), got)
+	if len(lines) < 6 {
+		t.Fatalf("expected header + 5 wrapped lines, got %d: %q", len(lines), got)
 	}
-	for i, line := range lines {
-		if displayWidth(line) != width {
-			t.Errorf("line %d not right-aligned: visible=%d, want=%d, line=%q",
-				i, displayWidth(line), width, line)
+	if w := displayWidth(stripANSI(lines[0])); w != senderColWidth {
+		t.Errorf("header line width = %d, want %d", w, senderColWidth)
+	}
+	for i, line := range lines[1:] {
+		if w := displayWidth(line); w != width-senderColWidth+senderColWidth {
+			// body line = blankCol (10) + body wrap (10) = 20 = width
+			t.Errorf("body line %d width = %d, want %d", i+1, w, width)
 		}
 	}
 }
@@ -116,9 +119,6 @@ func TestFormatMessage_OutgoingWidthZeroFallback(t *testing.T) {
 
 // TestFormatMessage_OutgoingUserNewlineIsHardBreak: a user-supplied newline
 // must start a fresh wrapped segment — wrap must NEVER cut across a '\n'.
-// Regression for the bug where outgoing messages in Saved Messages showed
-// garbage characters because wrapGraphemes treated '\n' as a 1-cell char and
-// split mid-line across the newline.
 func TestFormatMessage_OutgoingUserNewlineIsHardBreak(t *testing.T) {
 	m := telegram.Message{
 		Sender:   "You",
@@ -134,14 +134,78 @@ func TestFormatMessage_OutgoingUserNewlineIsHardBreak(t *testing.T) {
 			t.Errorf("missing %q in %q", want, got)
 		}
 	}
-	// No wrapped line should be a CONTIGUOUS slice that crosses a user \n.
-	// Walk every visible line and assert it does not contain the literal
-	// sequence "line\nsecond" or "line\nthird" — i.e. wrap never glued two
-	// user-lines into one.
+	// Continuation lines start with the blank sender column (10 spaces).
+	// No wrapped line should contain a literal "\nsecond" or "---" — i.e.
+	// wrap never glued two user-lines into one.
 	for _, line := range strings.Split(stripped, "\n") {
 		if strings.Contains(line, "line\nsecond") || strings.Contains(line, "line\nthird") {
 			t.Errorf("user newline was wrapped across: %q", line)
 		}
+	}
+}
+
+// TestFormatMessage_SenderColumnFixed10: every message's first line must be
+// exactly senderColWidth cells — keeps the body column aligned across rows.
+func TestFormatMessage_SenderColumnFixed10(t *testing.T) {
+	for _, name := range []string{"Al", "Alice", "Bob", "Christopher"} {
+		got := FormatMessage(telegram.Message{Sender: name, Text: "x"}, 40)
+		first := strings.Split(got, "\n")[0]
+		if w := displayWidth(stripANSI(first)); w != senderColWidth {
+			t.Errorf("sender %q: header width = %d, want %d", name, w, senderColWidth)
+		}
+	}
+}
+
+// TestFormatMessage_SenderTruncatesWithEllipsis: a sender name longer than
+// the column width must be truncated to fit with an ellipsis. Truncation
+// must respect display cells (so a CJK char isn't cut mid-glyph).
+func TestFormatMessage_SenderTruncatesWithEllipsis(t *testing.T) {
+	m := telegram.Message{Sender: "VeryLongNameIndeed", Text: "x"}
+	got := FormatMessage(m, 40)
+	first := stripANSI(strings.Split(got, "\n")[0])
+	if w := displayWidth(first); w != senderColWidth {
+		t.Errorf("truncated header width = %d, want %d", w, senderColWidth)
+	}
+	if !strings.Contains(first, "…") {
+		t.Errorf("long sender not truncated with ellipsis: %q", first)
+	}
+	// 8 visible chars + ellipsis + trailing space = 10 cells.
+	if !strings.HasSuffix(first, "… ") {
+		t.Errorf("expected truncated + ellipsis + space, got %q", first)
+	}
+}
+
+// TestFormatMessage_ContinuationAlignedToBody: lines after the first
+// (continuations of a wrapped or user-newline-split message) must start
+// with the blank sender column so the body column stays aligned.
+func TestFormatMessage_ContinuationAlignedToBody(t *testing.T) {
+	m := telegram.Message{Sender: "Alice", Text: "line one\nline two"}
+	got := FormatMessage(m, 80)
+	lines := strings.Split(got, "\n")
+	if len(lines) < 3 {
+		t.Fatalf("expected header + 2 body lines, got %d: %q", len(lines), got)
+	}
+	blankCol := strings.Repeat(" ", senderColWidth)
+	for i, line := range lines[1:] {
+		if !strings.HasPrefix(line, blankCol) {
+			t.Errorf("body line %d missing blank sender column: %q", i+1, line)
+		}
+	}
+	if lines[1] != blankCol+"line one" {
+		t.Errorf("body line 1 = %q", lines[1])
+	}
+	if lines[2] != blankCol+"line two" {
+		t.Errorf("body line 2 = %q", lines[2])
+	}
+}
+
+// TestFormatMessage_OutgoingUsesAccentColor: outgoing "You" must be colored
+// magenta so the user's own messages stand out in the thread without
+// changing the alignment.
+func TestFormatMessage_OutgoingUsesAccentColor(t *testing.T) {
+	got := FormatMessage(telegram.Message{Sender: "You", Text: "x", Outgoing: true}, 40)
+	if !strings.Contains(got, "\033[35m") {
+		t.Errorf("outgoing sender should use magenta (35), got %q", got)
 	}
 }
 
@@ -178,7 +242,7 @@ func TestWrapGraphemes_PreservesUTF8(t *testing.T) {
 	got := wrapGraphemes("👋👋👋👋👋", 4)
 	for _, line := range got {
 		if displayWidth(line) > 4 {
-			t.Errorf("wrapped line wider than requested: %q (width %d)", line, displayWidth(line))
+			t.Errorf("wrapped line wider than than: %q (width %d)", line, displayWidth(line))
 		}
 	}
 	// Reconstructed output must equal the original (no missing graphemes).
