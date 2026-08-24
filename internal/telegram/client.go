@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"fmt"
+	"sync"
 	"time"
 
 	"github.com/gotd/td/session"
@@ -16,6 +17,9 @@ import (
 type Client struct {
 	raw     *telegram.Client
 	storage session.Storage
+
+	mu    sync.Mutex
+	onMsg func(Message) // latest registered OnMessage handler (replaced on each registration)
 }
 
 // New constructs a Client. sessionFile is the path to a JSON file (gotd-managed).
@@ -23,15 +27,17 @@ type Client struct {
 // ready and stays connected.
 func New(ctx context.Context, appID int, apiHash, sessionFile string) (*Client, error) {
 	storage := &session.FileStorage{Path: sessionFile}
+	c := &Client{storage: storage}
+	// UpdateHandler wires us into gotd's update stream. We install it eagerly so
+	// gotd's setDefaults keeps NoUpdates=false (subscribes to updates). The
+	// user's OnMessage callback is registered separately — until one is set
+	// the handler is a no-op.
 	raw := telegram.NewClient(appID, apiHash, telegram.Options{
 		SessionStorage: storage,
-		// We don't need push updates; the TUI fetches history on demand.
-		// Disabling updates also skips gotd's internal c.Self() subscribe
-		// goroutine (see telegram.connect.runUntilRestart), saving a
-		// round-trip per session start.
-		NoUpdates: true,
+		UpdateHandler: telegram.UpdateHandlerFunc(c.handleUpdate),
 	})
-	return &Client{raw: raw, storage: storage}, nil
+	c.raw = raw
+	return c, nil
 }
 
 // Raw exposes the underlying gotd client. main.go uses it to hand the client
@@ -71,8 +77,134 @@ func (c *Client) SelfName(ctx context.Context) (string, error) {
 
 func (c *Client) Close() error {
 	// gotd client has no explicit Close; storage closes when GC'd.
-	// Future: explicit cleanup if needed.
 	return nil
+}
+
+// OnMessage registers the callback fired for each newly-received message.
+// Replaces any previously-registered handler. Called from gotd's update
+// goroutine; implementations must not block.
+func (c *Client) OnMessage(handler func(Message)) {
+	c.mu.Lock()
+	c.onMsg = handler
+	c.mu.Unlock()
+}
+
+// handleUpdate is the gotd UpdateHandler entry point. It walks every
+// tg.UpdatesClass variant, extracts new chat messages, and forwards them to
+// the registered OnMessage handler.
+//
+// gotd's higher-level UpdateDispatcher DOES NOT route
+// UpdateShortMessage / UpdateShortChatMessage / UpdateShortSentMessage (see
+// tg/tl_handlers_gen.go) — those are the variants Telegram uses for P2P
+// chats and small groups, which is exactly where we want to see updates. So
+// we implement the dispatch ourselves over the raw UpdatesClass interface.
+func (c *Client) handleUpdate(ctx context.Context, u tg.UpdatesClass) error {
+	c.dispatchUpdatesClass(ctx, u)
+	return nil
+}
+
+// dispatchUpdatesClass walks one update container and fires OnMessage for
+// each new message it contains. Outgoing messages (m.Out / v.Out) are
+// skipped — they're already returned by Send() and we'd otherwise duplicate.
+func (c *Client) dispatchUpdatesClass(ctx context.Context, u tg.UpdatesClass) {
+	switch v := u.(type) {
+	case *tg.UpdateShortMessage:
+		// P2P message (1-on-1 chat). UserID is the OTHER party — for incoming
+		// (Out=false) it's the sender, for outgoing (Out=true) it's the peer
+		// we sent to. Skip outgoing to avoid duplicating Send's echo.
+		if v.Out {
+			return
+		}
+		c.fire(Message{
+			ID:       int64(v.ID),
+			PeerID:   v.UserID,
+			PeerKind: "user",
+			Sender:   fmt.Sprintf("User %d", v.UserID),
+			Text:     v.Message,
+			Time:     time.Unix(int64(v.Date), 0),
+			Outgoing: false,
+		})
+	case *tg.UpdateShortChatMessage:
+		// Group chat message. FromID is the sender user, ChatID is the group.
+		// Skip outgoing (we already saw it via Send's UpdateMessageID).
+		if v.Out {
+			return
+		}
+		c.fire(Message{
+			ID:       int64(v.ID),
+			PeerID:   v.ChatID,
+			PeerKind: "group",
+			Sender:   fmt.Sprintf("User %d", v.FromID),
+			Text:     v.Message,
+			Time:     time.Unix(int64(v.Date), 0),
+			Outgoing: false,
+		})
+	case *tg.UpdateShortSentMessage:
+		// Echo of our own P2P send (the response to messages.sendMessage for
+		// users carries this). Send already returns the Message; ignore.
+		return
+	case *tg.UpdateShort:
+		c.dispatchSingleUpdate(ctx, v.Update, nil, nil)
+	case *tg.Updates:
+		users, chats := indexUsersAndChats(v.Users, v.Chats)
+		for _, x := range v.Updates {
+			c.dispatchSingleUpdate(ctx, x, users, chats)
+		}
+	case *tg.UpdatesCombined:
+		users, chats := indexUsersAndChats(v.Users, v.Chats)
+		for _, x := range v.Updates {
+			c.dispatchSingleUpdate(ctx, x, users, chats)
+		}
+	}
+}
+
+// dispatchSingleUpdate extracts a Message from one update entry. Only the
+// new-message variants are interesting for live chat; everything else
+// (typing indicators, read receipts, etc.) is silently ignored.
+func (c *Client) dispatchSingleUpdate(ctx context.Context, u tg.UpdateClass, users map[int64]*tg.User, chats map[int64]tg.ChatClass) {
+	switch v := u.(type) {
+	case *tg.UpdateNewMessage:
+		mm, ok := v.Message.(*tg.Message)
+		if !ok {
+			return // empty/service message — not chat content
+		}
+		m := c.messageFromGotd(ctx, mm, users, chats)
+		if mm.PeerID != nil {
+			m.PeerID = peerID(mm.PeerID)
+			m.PeerKind = peerKind(mm.PeerID)
+		}
+		if mm.Out {
+			// Already appended optimistically by sendMessage.
+			return
+		}
+		c.fire(m)
+	case *tg.UpdateNewChannelMessage:
+		mm, ok := v.Message.(*tg.Message)
+		if !ok {
+			return
+		}
+		m := c.messageFromGotd(ctx, mm, users, chats)
+		if mm.PeerID != nil {
+			m.PeerID = peerID(mm.PeerID)
+			m.PeerKind = peerKind(mm.PeerID)
+		}
+		if mm.Out {
+			return
+		}
+		c.fire(m)
+	}
+}
+
+// fire invokes the registered handler if any. Pulls it under the lock so
+// OnMessage can replace it concurrently without races.
+func (c *Client) fire(m Message) {
+	c.mu.Lock()
+	h := c.onMsg
+	c.mu.Unlock()
+	if h == nil {
+		return
+	}
+	h(m)
 }
 
 // Dialogs returns the user's recent conversations via gotd's messages.getDialogs.
@@ -174,6 +306,8 @@ func (c *Client) accessHash(p tg.PeerClass, users map[int64]*tg.User, chats map[
 }
 
 // History returns the most recent `limit` messages from `peer` (oldest-first within the window).
+// Each returned Message carries PeerID/PeerKind so callers can route incoming
+// live updates back to the same window.
 func (c *Client) History(ctx context.Context, peer Peer, limit int) ([]Message, error) {
 	inputPeer, err := c.inputPeer(peer)
 	if err != nil {
@@ -224,7 +358,13 @@ func (c *Client) History(ctx context.Context, peer Peer, limit int) ([]Message, 
 	out := make([]Message, 0, len(msgs))
 	for _, mc := range msgs {
 		if mm, ok := mc.(*tg.Message); ok {
-			out = append(out, c.messageFromGotd(ctx, mm, userByID, chatByID))
+			m := c.messageFromGotd(ctx, mm, userByID, chatByID)
+			// Peer info is the same for every message in this page — stamp
+			// it directly instead of relying on the per-message PeerID,
+			// which on private chats can be empty for outgoing messages.
+			m.PeerID = peer.ID
+			m.PeerKind = peer.Kind
+			out = append(out, m)
 		}
 	}
 	// Telegram returns messages newest-first (the first item is the most
@@ -257,7 +397,9 @@ func (c *Client) messageFromGotd(ctx context.Context, m *tg.Message, users map[i
 	}
 }
 
-// Send posts `text` to `peer` and returns the echoed message.
+// Send posts `text` to `peer` and returns the echoed message. ID/PeerID/PeerKind
+// are filled in from the server response so callers can prepend it to their
+// local message list without a follow-up History() call.
 func (c *Client) Send(ctx context.Context, peer Peer, text string) (Message, error) {
 	inputPeer, err := c.inputPeer(peer)
 	if err != nil {
@@ -272,7 +414,15 @@ func (c *Client) Send(ctx context.Context, peer Peer, text string) (Message, err
 		return Message{}, fmt.Errorf("send: %w", err)
 	}
 	echo := func(id int) Message {
-		return Message{ID: int64(id), Sender: "You", Text: text, Time: time.Now(), Outgoing: true}
+		return Message{
+			ID:       int64(id),
+			PeerID:   peer.ID,
+			PeerKind: peer.Kind,
+			Sender:   "You",
+			Text:     text,
+			Time:     time.Now(),
+			Outgoing: true,
+		}
 	}
 	// gotd returns UpdatesClass — different concrete types per destination.
 	// Pull UpdateMessageID (groups/channels) or fall through to UpdateShortMessage (P2P).
@@ -312,6 +462,23 @@ func (c *Client) inputPeer(p Peer) (tg.InputPeerClass, error) {
 	default:
 		return nil, fmt.Errorf("unknown peer kind %q", p.Kind)
 	}
+}
+
+// indexUsersAndChats builds the lookup maps dispatchSingleUpdate uses to
+// resolve sender names without extra API calls. Returns nil maps if the
+// container didn't bundle any (e.g. UpdateShort).
+func indexUsersAndChats(users []tg.UserClass, chats []tg.ChatClass) (map[int64]*tg.User, map[int64]tg.ChatClass) {
+	u := make(map[int64]*tg.User, len(users))
+	for _, x := range users {
+		if uu, ok := x.(*tg.User); ok {
+			u[uu.ID] = uu
+		}
+	}
+	c := make(map[int64]tg.ChatClass, len(chats))
+	for _, x := range chats {
+		c[x.GetID()] = x
+	}
+	return u, c
 }
 
 func randInt64() int64 {

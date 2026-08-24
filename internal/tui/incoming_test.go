@@ -1,0 +1,130 @@
+package tui
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/rivo/tview"
+
+	"github.com/user/tgchat/internal/telegram"
+)
+
+// newTestApp builds an App with the bare widgets handleIncoming touches: the
+// chat TextView (active-peer path) plus the sidebar + a FakeAPI (non-active
+// path triggers a dialogs refresh). No Application, no input — keeps the
+// tests free of tview's event loop.
+func newTestApp(dialogs []telegram.Dialog) (*App, *telegram.FakeAPI) {
+	api := &telegram.FakeAPI{
+		DialogsFn: func(ctx context.Context) ([]telegram.Dialog, error) {
+			return dialogs, nil
+		},
+	}
+	a := &App{
+		chat:       tview.NewTextView(),
+		sidebar:    tview.NewList(),
+		api:        api,
+		ctx:        context.Background(),
+		activePeer: telegram.Peer{ID: 7, Kind: "user"},
+	}
+	return a, api
+}
+
+func TestHandleIncoming_AppendsForActivePeer(t *testing.T) {
+	a, _ := newTestApp(nil)
+	a.handleIncoming(telegram.Message{
+		ID: 100, PeerID: 7, PeerKind: "user", Sender: "Alice", Text: "hi",
+		Time: time.Now(),
+	})
+	if len(a.messages) != 1 || a.messages[0].ID != 100 {
+		t.Errorf("messages = %+v, want one entry with ID=100", a.messages)
+	}
+	if a.chatRaw == "" {
+		t.Error("chatRaw empty after append")
+	}
+}
+
+func TestHandleIncoming_SkipsOtherPeerAndRefreshesDialogs(t *testing.T) {
+	dialogs := []telegram.Dialog{
+		{ID: 7, Kind: "user", Title: "Alice"},
+		{ID: 99, Kind: "user", Title: "Bob"},
+	}
+	a, api := newTestApp(dialogs)
+	calls := 0
+	api.DialogsFn = func(ctx context.Context) ([]telegram.Dialog, error) {
+		calls++
+		return dialogs, nil
+	}
+	a.handleIncoming(telegram.Message{
+		ID: 100, PeerID: 99, PeerKind: "user", Text: "from Bob",
+	})
+	if len(a.messages) != 0 {
+		t.Errorf("message from wrong peer was appended: %+v", a.messages)
+	}
+	if calls != 1 {
+		t.Errorf("expected refreshDialogs to call api.Dialogs once, got %d", calls)
+	}
+	// Sidebar should now reflect the new list (still both dialogs).
+	if a.sidebar.GetItemCount() != 2 {
+		t.Errorf("sidebar item count = %d, want 2", a.sidebar.GetItemCount())
+	}
+}
+
+func TestHandleIncoming_SkipsDifferentKind(t *testing.T) {
+	a, _ := newTestApp(nil)
+	// Same numeric ID but group instead of user — should not append and
+	// should hit the dialogs refresh branch.
+	a.handleIncoming(telegram.Message{
+		ID: 7, PeerID: 7, PeerKind: "group", Text: "x",
+	})
+	if len(a.messages) != 0 {
+		t.Errorf("different-kind peer was appended: %+v", a.messages)
+	}
+}
+
+func TestHandleIncoming_DedupesByID(t *testing.T) {
+	a, _ := newTestApp(nil)
+	// First append (e.g. optimistic sendMessage result).
+	a.messages = []telegram.Message{{ID: 42, PeerID: 7, PeerKind: "user", Text: "echo", Outgoing: true}}
+	a.chatRaw = RenderHistory(a.messages, chatPaneWidth(a.chat))
+	// Server echoes the same message via an update we forgot to filter.
+	a.handleIncoming(telegram.Message{
+		ID: 42, PeerID: 7, PeerKind: "user", Text: "echo", Outgoing: true,
+	})
+	if len(a.messages) != 1 {
+		t.Errorf("duplicate appended: messages = %+v", a.messages)
+	}
+}
+
+// TestRefreshDialogs_PreservesActiveIdx verifies active selection survives a
+// list reorder: the active peer at index 1 moves to index 0 because a new
+// incoming message bubbles its dialog to the top, and activeIdx must follow.
+func TestRefreshDialogs_PreservesActiveIdx(t *testing.T) {
+	dialogsBefore := []telegram.Dialog{
+		{ID: 99, Kind: "user", Title: "Bob"},
+		{ID: 7, Kind: "user", Title: "Alice"}, // activeIdx=1
+	}
+	dialogsAfter := []telegram.Dialog{
+		{ID: 7, Kind: "user", Title: "Alice"}, // bumped to top
+		{ID: 99, Kind: "user", Title: "Bob"},
+	}
+	api := &telegram.FakeAPI{
+		DialogsFn: func(ctx context.Context) ([]telegram.Dialog, error) {
+			return dialogsAfter, nil
+		},
+	}
+	a := &App{
+		sidebar: tview.NewList(),
+		api:     api,
+		dialogs: dialogsBefore,
+		activeIdx: 1,
+		ctx:     context.Background(),
+	}
+	a.refreshDialogs()
+	if a.activeIdx != 0 {
+		t.Errorf("activeIdx = %d, want 0 (followed Alice to top)", a.activeIdx)
+	}
+	if a.sidebar.GetCurrentItem() != 0 {
+		t.Errorf("sidebar current = %d, want 0", a.sidebar.GetCurrentItem())
+	}
+}

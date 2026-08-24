@@ -1,0 +1,198 @@
+package telegram
+
+import (
+	"context"
+	"testing"
+	"time"
+
+	"github.com/gotd/td/tg"
+)
+
+// TestFakeAPI_OnMessage verifies FakeAPI implements the API surface and that
+// OnMessage routes through the OnMessageFn field for tests to script.
+func TestFakeAPI_OnMessage(t *testing.T) {
+	var got Message
+	api := &FakeAPI{
+		OnMessageFn: func(h func(Message)) { h(Message{ID: 1, Text: "x"}) },
+	}
+	// Drive through the OnMessage entry point — FakeAPI.OnMessage invokes
+	// OnMessageFn when set, which exercises the same wiring tests use to
+	// script live updates.
+	api.OnMessage(func(m Message) { got = m })
+	if got.ID != 1 || got.Text != "x" {
+		t.Errorf("got %+v, want ID=1 Text=x", got)
+	}
+}
+
+// TestDispatch_UpdateShortMessageIncoming verifies a P2P incoming message
+// (Out=false) is forwarded to the OnMessage handler with PeerID/PeerKind
+// filled in.
+func TestDispatch_UpdateShortMessageIncoming(t *testing.T) {
+	c := &Client{}
+	var got Message
+	c.OnMessage(func(m Message) { got = m })
+	if err := c.handleUpdate(context.Background(), &tg.UpdateShortMessage{
+		ID:      7,
+		UserID:  42,
+		Message: "hi",
+		Date:    1700000000,
+		Out:     false,
+	}); err != nil {
+		t.Fatalf("handleUpdate: %v", err)
+	}
+	if got.ID != 7 || got.PeerID != 42 || got.PeerKind != "user" {
+		t.Errorf("got %+v, want ID=7 PeerID=42 PeerKind=user", got)
+	}
+	if got.Text != "hi" {
+		t.Errorf("Text = %q, want hi", got.Text)
+	}
+	if got.Outgoing {
+		t.Error("incoming UpdateShortMessage should set Outgoing=false")
+	}
+	if !got.Time.Equal(time.Unix(1700000000, 0)) {
+		t.Errorf("Time = %v, want Unix 1700000000", got.Time)
+	}
+}
+
+// TestDispatch_UpdateShortMessageOutgoingSkipped verifies outgoing P2P
+// messages are NOT forwarded — Send() already returns them.
+func TestDispatch_UpdateShortMessageOutgoingSkipped(t *testing.T) {
+	c := &Client{}
+	calls := 0
+	c.OnMessage(func(m Message) { calls++ })
+	if err := c.handleUpdate(context.Background(), &tg.UpdateShortMessage{
+		ID: 7, UserID: 42, Message: "echoed back", Out: true,
+	}); err != nil {
+		t.Fatalf("handleUpdate: %v", err)
+	}
+	if calls != 0 {
+		t.Errorf("outgoing UpdateShortMessage should not fire handler, got %d calls", calls)
+	}
+}
+
+// TestDispatch_UpdateShortSentMessageSkipped verifies the dedicated echo
+// update for our own P2P send is dropped (Send() already returns it).
+func TestDispatch_UpdateShortSentMessageSkipped(t *testing.T) {
+	c := &Client{}
+	calls := 0
+	c.OnMessage(func(m Message) { calls++ })
+	_ = c.handleUpdate(context.Background(), &tg.UpdateShortSentMessage{
+		ID: 9, Date: 1700000000,
+	})
+	if calls != 0 {
+		t.Errorf("UpdateShortSentMessage should not fire handler, got %d calls", calls)
+	}
+}
+
+// TestDispatch_UpdateShortChatMessageIncoming verifies group chat incoming
+// messages carry the chat peer (ChatID, "group").
+func TestDispatch_UpdateShortChatMessageIncoming(t *testing.T) {
+	c := &Client{}
+	var got Message
+	c.OnMessage(func(m Message) { got = m })
+	_ = c.handleUpdate(context.Background(), &tg.UpdateShortChatMessage{
+		ID: 11, ChatID: 999, FromID: 7, Message: "gm", Date: 1700000000, Out: false,
+	})
+	if got.PeerID != 999 || got.PeerKind != "group" {
+		t.Errorf("got %+v, want PeerID=999 PeerKind=group", got)
+	}
+	if got.Outgoing || got.Text != "gm" {
+		t.Errorf("unexpected message fields: %+v", got)
+	}
+}
+
+// TestDispatch_UpdateNewMessageIncoming verifies an Updates container with a
+// single UpdateNewMessage (Out=false) forwards one Message with the
+// message's own PeerID/PeerKind.
+func TestDispatch_UpdateNewMessageIncoming(t *testing.T) {
+	c := &Client{}
+	var got Message
+	c.OnMessage(func(m Message) { got = m })
+	_ = c.handleUpdate(context.Background(), &tg.Updates{
+		Updates: []tg.UpdateClass{
+			&tg.UpdateNewMessage{
+				Message: &tg.Message{
+					ID:      42,
+					Message: "ping",
+					Date:    1700000000,
+					PeerID:  &tg.PeerUser{UserID: 7},
+					Out:     false,
+				},
+				Pts: 1,
+			},
+		},
+	})
+	if got.ID != 42 || got.PeerID != 7 || got.PeerKind != "user" || got.Text != "ping" {
+		t.Errorf("got %+v", got)
+	}
+}
+
+// TestDispatch_UpdateNewMessageOutgoingSkipped verifies Updates carrying our
+// own sent message don't duplicate the optimistic append from sendMessage.
+func TestDispatch_UpdateNewMessageOutgoingSkipped(t *testing.T) {
+	c := &Client{}
+	calls := 0
+	c.OnMessage(func(m Message) { calls++ })
+	_ = c.handleUpdate(context.Background(), &tg.Updates{
+		Updates: []tg.UpdateClass{
+			&tg.UpdateNewMessage{
+				Message: &tg.Message{
+					ID: 42, Message: "ping", Date: 1700000000,
+					PeerID: &tg.PeerUser{UserID: 7}, Out: true,
+				},
+			},
+		},
+	})
+	if calls != 0 {
+		t.Errorf("outgoing UpdateNewMessage should not fire handler, got %d calls", calls)
+	}
+}
+
+// TestDispatch_UpdateNewChannelMessageIncoming verifies channel updates use
+// PeerChannel and "channel" kind. Wrapped in UpdateShort because individual
+// UpdateClass entries arrive via the *Short wrapper.
+func TestDispatch_UpdateNewChannelMessageIncoming(t *testing.T) {
+	c := &Client{}
+	var got Message
+	c.OnMessage(func(m Message) { got = m })
+	_ = c.handleUpdate(context.Background(), &tg.UpdateShort{
+		Update: &tg.UpdateNewChannelMessage{
+			Message: &tg.Message{
+				ID: 1, Message: "broadcast", Date: 1700000000,
+				PeerID: &tg.PeerChannel{ChannelID: 555},
+			},
+		},
+	})
+	if got.PeerID != 555 || got.PeerKind != "channel" {
+		t.Errorf("got %+v, want PeerID=555 PeerKind=channel", got)
+	}
+}
+
+// TestDispatch_NoHandler verifies an update with no registered OnMessage is
+// silently dropped (no panic, no error).
+func TestDispatch_NoHandler(t *testing.T) {
+	c := &Client{}
+	if err := c.handleUpdate(context.Background(), &tg.UpdateShortMessage{
+		ID: 1, UserID: 1, Message: "x", Date: 1,
+	}); err != nil {
+		t.Errorf("handleUpdate without handler: %v", err)
+	}
+}
+
+// TestOnMessage_Replace verifies the most recently registered handler wins
+// (the documented contract — multiple calls replace).
+func TestOnMessage_Replace(t *testing.T) {
+	c := &Client{}
+	var first, second int
+	c.OnMessage(func(Message) { first++ })
+	c.OnMessage(func(Message) { second++ })
+	_ = c.handleUpdate(context.Background(), &tg.UpdateShortMessage{
+		ID: 1, UserID: 1, Message: "x", Date: 1,
+	})
+	if first != 0 {
+		t.Errorf("replaced handler still firing: first=%d", first)
+	}
+	if second != 1 {
+		t.Errorf("replacement handler not called: second=%d", second)
+	}
+}

@@ -34,6 +34,11 @@ type App struct {
 	visMode      bool
 	visStart     cursorPos // anchor set when 'v' was pressed (inclusive)
 	visEnd       cursorPos // current cursor (inclusive)
+	// activePeer is the dialog currently shown in the chat pane. Live
+	// incoming messages are routed here: only matching PeerID/PeerKind are
+	// appended to `messages`.
+	activePeer telegram.Peer
+	messages  []telegram.Message
 }
 
 // cursorPos is a 1-based (line, col) position in display cells.
@@ -51,7 +56,44 @@ func Run(ctx context.Context, api telegram.API, selfName string) error {
 		sidebarShown: true,
 	}
 	app.build(selfName)
+	// Subscribe to live updates BEFORE the tview loop starts so the
+	// handler is wired before any update arrives. The handler hops onto
+	// the UI goroutine via QueueUpdateDraw — OnMessage itself runs on
+	// gotd's update goroutine, but tview primitives are not thread-safe.
+	api.OnMessage(app.onIncoming)
 	return app.tv.Run()
+}
+
+// onIncoming is invoked by telegram.Client from gotd's update goroutine.
+// We bounce onto the UI goroutine via QueueUpdateDraw before touching
+// any tview widgets or shared App state.
+func (a *App) onIncoming(m telegram.Message) {
+	a.tv.QueueUpdateDraw(func() {
+		a.handleIncoming(m)
+	})
+}
+
+// handleIncoming routes a live message to the right surface: append to the
+// active chat when it matches, otherwise refresh the sidebar so the
+// dialog's last message + unread count update. Dedups by ID so our own
+// optimistic append (from sendMessage) doesn't double up if the server
+// echoes back via an update we forgot to filter on the client side.
+func (a *App) handleIncoming(m telegram.Message) {
+	if m.PeerID == a.activePeer.ID && m.PeerKind == a.activePeer.Kind {
+		for _, existing := range a.messages {
+			if existing.ID == m.ID && m.ID != 0 {
+				return // already have it (sendMessage added it optimistically)
+			}
+		}
+		a.messages = append(a.messages, m)
+		a.chatRaw = RenderHistory(a.messages, chatPaneWidth(a.chat))
+		a.refreshChat()
+		a.chat.ScrollToEnd()
+		return
+	}
+	// Non-active chat — refresh the sidebar so it shows the new last
+	// message preview and bumps the unread count.
+	a.refreshDialogs()
 }
 
 func (a *App) build(selfName string) {
@@ -315,6 +357,16 @@ func (a *App) refreshDialogs() {
 		a.toast(fmt.Sprintf("dialogs error: %v", err))
 		return
 	}
+	// Preserve active selection across refresh by remapping the index from
+	// the active peer ID+Kind. Without this, activeIdx could point at a
+	// different dialog after the list reorders (e.g. another chat bubbles
+	// to the top because it received a new message).
+	var activeID int64
+	var activeKind string
+	if a.activeIdx >= 0 && a.activeIdx < len(a.dialogs) {
+		activeID = a.dialogs[a.activeIdx].ID
+		activeKind = a.dialogs[a.activeIdx].Kind
+	}
 	a.dialogs = dialogs
 	a.sidebar.Clear()
 	rows := RenderSidebar(dialogs, a.activeIdx)
@@ -324,8 +376,19 @@ func (a *App) refreshDialogs() {
 			a.openByArgs([]string{fmt.Sprint(idx + 1)})
 		})
 	}
-	if a.activeIdx >= 0 && a.activeIdx < len(dialogs) {
-		a.sidebar.SetCurrentItem(a.activeIdx)
+	if activeID != 0 {
+		for i, d := range dialogs {
+			if d.ID == activeID && d.Kind == activeKind {
+				a.activeIdx = i
+				a.sidebar.SetCurrentItem(i)
+				return
+			}
+		}
+		// Active dialog dropped out of the top-100 — clamp activeIdx so
+		// the sidebar stays in range.
+		if a.activeIdx >= len(dialogs) {
+			a.activeIdx = len(dialogs) - 1
+		}
 	}
 }
 
@@ -360,7 +423,12 @@ func (a *App) loadHistory(limit int) {
 		a.toast(fmt.Sprintf("history error: %v", err))
 		return
 	}
-	a.chatRaw = RenderHistory(msgs, chatPaneWidth(a.chat))
+	// Cache peer + messages so handleIncoming can route live updates to
+	// this same window and sendMessage can append the new row without a
+	// full history refetch.
+	a.activePeer = peer
+	a.messages = msgs
+	a.chatRaw = RenderHistory(a.messages, chatPaneWidth(a.chat))
 	a.refreshChat()
 	// Track-end mode: keeps the newest line visible when SetText is called,
 	// so opening a chat or sending a message auto-scrolls to the bottom
@@ -375,12 +443,22 @@ func (a *App) sendMessage(text string) {
 	}
 	d := a.dialogs[a.activeIdx]
 	peer := telegram.Peer{ID: d.ID, Kind: d.Kind, AccessHash: d.AccessHash}
-	if _, err := a.api.Send(a.ctx, peer, text); err != nil {
+	sent, err := a.api.Send(a.ctx, peer, text)
+	if err != nil {
 		a.toast(fmt.Sprintf("send error: %v", err))
 		return
 	}
-	// Optimistic: reload history to show the new outgoing message.
-	a.loadHistory(50)
+	// Optimistic append — no need to round-trip History() to see our own
+	// message. handleIncoming dedups by ID if the server also echoes the
+	// message back through an update we forgot to filter.
+	if sent.ID == 0 {
+		// P2P send with no echoed ID — fall back to a local placeholder.
+		sent.ID = -int64(len(a.messages) + 1)
+	}
+	a.messages = append(a.messages, sent)
+	a.chatRaw = RenderHistory(a.messages, chatPaneWidth(a.chat))
+	a.refreshChat()
+	a.chat.ScrollToEnd()
 }
 
 func (a *App) showHelp() {
