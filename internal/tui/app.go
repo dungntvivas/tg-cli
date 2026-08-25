@@ -85,6 +85,11 @@ func (a *App) onIncoming(m telegram.Message) {
 // dialog's last message + unread count update. Dedups by ID so our own
 // optimistic append (from sendMessage) doesn't double up if the server
 // echoes back via an update we forgot to filter on the client side.
+//
+// When a message arrives in the currently-open chat, we also send MarkRead
+// so the unread badge clears immediately — the user is clearly reading the
+// stream as messages land, so we shouldn't make them wait for the next
+// open/refresh to clear it.
 func (a *App) handleIncoming(m telegram.Message) {
 	if m.PeerID == a.activePeer.ID && m.PeerKind == a.activePeer.Kind {
 		for _, existing := range a.messages {
@@ -96,6 +101,11 @@ func (a *App) handleIncoming(m telegram.Message) {
 		a.chatRaw = RenderHistory(a.messages, chatPaneWidth(a.chat))
 		a.refreshChat()
 		a.chat.ScrollToEnd()
+		// MarkRead: failure is non-fatal — message already rendered, badge
+		// just lingers until the next refreshDialogs picks up server state.
+		if err := a.api.MarkRead(a.ctx, a.activePeer); err != nil {
+			a.toast(fmt.Sprintf("mark-read failed: %v", err))
+		}
 		return
 	}
 	// Non-active chat — refresh the sidebar so it shows the new last

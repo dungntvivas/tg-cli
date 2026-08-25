@@ -47,6 +47,99 @@ func TestHandleIncoming_AppendsForActivePeer(t *testing.T) {
 	}
 }
 
+// TestHandleIncoming_ActivePeer_MarksRead verifies a live message that
+// arrives in the open chat fires MarkRead so the server-side unread
+// badge clears immediately — the user is reading the stream in real time.
+func TestHandleIncoming_ActivePeer_MarksRead(t *testing.T) {
+	markReadCalls := 0
+	var markedPeer telegram.Peer
+	api := &telegram.FakeAPI{
+		MarkReadFn: func(ctx context.Context, peer telegram.Peer) error {
+			markReadCalls++
+			markedPeer = peer
+			return nil
+		},
+	}
+	a := &App{
+		chat:       tview.NewTextView(),
+		chatHeader: tview.NewTextView(),
+		api:        api,
+		ctx:        context.Background(),
+		activePeer: telegram.Peer{ID: 7, Kind: "user"},
+	}
+	a.handleIncoming(telegram.Message{
+		ID: 101, PeerID: 7, PeerKind: "user", Text: "live",
+	})
+	if markReadCalls != 1 {
+		t.Errorf("MarkRead calls = %d, want 1 (live msg in open chat must mark read)", markReadCalls)
+	}
+	if markedPeer.ID != 7 || markedPeer.Kind != "user" {
+		t.Errorf("MarkRead peer = %+v, want {ID:7 Kind:user}", markedPeer)
+	}
+}
+
+// TestHandleIncoming_OtherPeer_NoMarkRead ensures we don't mark-read for
+// messages in OTHER dialogs — only the active chat triggers MarkRead on
+// live update. Other chats refresh the sidebar so the unread count
+// stays accurate until the user opens them.
+func TestHandleIncoming_OtherPeer_NoMarkRead(t *testing.T) {
+	markReadCalls := 0
+	dialogsCalls := 0
+	api := &telegram.FakeAPI{
+		MarkReadFn: func(ctx context.Context, peer telegram.Peer) error {
+			markReadCalls++
+			return nil
+		},
+		DialogsFn: func(ctx context.Context) ([]telegram.Dialog, error) {
+			dialogsCalls++
+			return nil, nil // triggers refreshDialogs branch on non-active peer
+		},
+	}
+	a := &App{
+		chat:       tview.NewTextView(),
+		chatHeader: tview.NewTextView(),
+		sidebar:    tview.NewList(),
+		api:        api,
+		ctx:        context.Background(),
+		activePeer: telegram.Peer{ID: 7, Kind: "user"},
+	}
+	a.handleIncoming(telegram.Message{
+		ID: 200, PeerID: 99, PeerKind: "user", Text: "from other chat",
+	})
+	if markReadCalls != 0 {
+		t.Errorf("MarkRead calls = %d, want 0 (non-active peer must NOT mark read)", markReadCalls)
+	}
+	if dialogsCalls == 0 {
+		t.Errorf("refreshDialogs not called on non-active peer (sidebar won't update)")
+	}
+}
+
+// TestHandleIncoming_MarkReadFailure_NonFatal: a mark-read failure (e.g.
+// transient network) must not stop the chat from rendering. The message
+// is still appended; we just surface a toast and let the next refresh
+// pick up the server-side state.
+func TestHandleIncoming_MarkReadFailure_NonFatal(t *testing.T) {
+	api := &telegram.FakeAPI{
+		MarkReadFn: func(ctx context.Context, peer telegram.Peer) error {
+			return errors.New("rate limited")
+		},
+	}
+	a := &App{
+		chat:       tview.NewTextView(),
+		chatHeader: tview.NewTextView(),
+		status:     tview.NewTextView(),
+		api:        api,
+		ctx:        context.Background(),
+		activePeer: telegram.Peer{ID: 7, Kind: "user"},
+	}
+	a.handleIncoming(telegram.Message{
+		ID: 300, PeerID: 7, PeerKind: "user", Text: "still rendered",
+	})
+	if len(a.messages) != 1 {
+		t.Errorf("messages = %+v, want 1 entry (mark-read failure must not block render)", a.messages)
+	}
+}
+
 func TestHandleIncoming_SkipsOtherPeerAndRefreshesDialogs(t *testing.T) {
 	dialogs := []telegram.Dialog{
 		{ID: 7, Kind: "user", Title: "Alice"},
