@@ -62,8 +62,9 @@ func (c *Client) Run(ctx context.Context, f func(ctx context.Context) error) err
 	return c.raw.Run(ctx, f)
 }
 
-// SelfName returns the current user's display name (e.g. "@alice" or "Alice").
-// Requires client.Run() to have been started so the gotd client is connected.
+// SelfName returns the current user's display name (e.g. "@alice" or
+// "Alice Smith"). Requires client.Run() to have been started so the gotd
+// client is connected.
 func (c *Client) SelfName(ctx context.Context) (string, error) {
 	u, err := c.raw.Self(ctx)
 	if err != nil {
@@ -72,7 +73,25 @@ func (c *Client) SelfName(ctx context.Context) (string, error) {
 	if u.Username != "" {
 		return "@" + u.Username, nil
 	}
-	return u.FirstName, nil
+	return fullName(u.FirstName, u.LastName), nil
+}
+
+// fullName joins FirstName + LastName with a single space when both are
+// present. Telegram stores them separately; we want both so users with
+// distinct family + given names (the common case) are not truncated to
+// the given name only. Edge cases:
+//
+//	"Alice", ""       → "Alice"
+//	"",     "Smith"   → "Smith"
+//	"",     ""        → ""            (caller falls back to its own placeholder)
+//	"Alice", "Smith"  → "Alice Smith"
+func fullName(first, last string) string {
+	switch {
+	case first != "" && last != "":
+		return first + " " + last
+	default:
+		return first + last
+	}
 }
 
 func (c *Client) Close() error {
@@ -582,7 +601,7 @@ func peerTitle(ctx context.Context, p tg.PeerClass, users map[int64]*tg.User, ch
 		if user.Username != "" {
 			return "@" + user.Username, nil
 		}
-		return user.FirstName, nil
+		return fullName(user.FirstName, user.LastName), nil
 	case *tg.PeerChat:
 		ch, ok := chats[v.ChatID]
 		if !ok {

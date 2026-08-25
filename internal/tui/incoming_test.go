@@ -219,8 +219,8 @@ func TestLoadHistory_MarkReadFailureDoesNotBlockUI(t *testing.T) {
 func TestSetChatHeader_UpdatesTitle(t *testing.T) {
 	a := &App{chatHeader: tview.NewTextView()}
 	a.setChatHeader("Alice")
-	if got := a.chatHeader.GetText(true); got != chatPrefix+"Alice" {
-		t.Errorf("header text = %q, want %q", got, chatPrefix+"Alice")
+	if got := a.chatHeader.GetText(true); got != chatHeaderPrefix+"Alice" {
+		t.Errorf("header text = %q, want %q", got, chatHeaderPrefix+"Alice")
 	}
 }
 

@@ -276,3 +276,45 @@ func TestDispatch_GroupSender_UsesFromID(t *testing.T) {
 		t.Errorf("Sender = %q, want Bob (group sender must come from FromID)", got.Sender)
 	}
 }
+
+// TestFullName_TableCases covers the four shape combinations Telegram
+// produces: both names, first only, last only, and empty (caller handles).
+func TestFullName_TableCases(t *testing.T) {
+	cases := []struct {
+		first, last, want string
+	}{
+		{"Alice", "Smith", "Alice Smith"},
+		{"Alice", "", "Alice"},
+		{"", "Smith", "Smith"},
+		{"", "", ""},
+	}
+	for _, c := range cases {
+		if got := fullName(c.first, c.last); got != c.want {
+			t.Errorf("fullName(%q, %q) = %q, want %q", c.first, c.last, got, c.want)
+		}
+	}
+}
+
+// TestDispatch_P2PIncoming_BothNamesCombined verifies the user-facing fix:
+// when Telegram sends both FirstName and LastName, the chat pane shows
+// "FirstName LastName", not just the given name.
+func TestDispatch_P2PIncoming_BothNamesCombined(t *testing.T) {
+	c := &Client{}
+	var got Message
+	c.OnMessage(func(m Message) { got = m })
+	_ = c.handleUpdate(context.Background(), &tg.Updates{
+		Users: []tg.UserClass{&tg.User{ID: 7, FirstName: "Nguyễn Văn", LastName: "A"}},
+		Updates: []tg.UpdateClass{
+			&tg.UpdateNewMessage{
+				Message: &tg.Message{
+					ID: 1, Message: "hi", Date: 1700000000,
+					PeerID: &tg.PeerUser{UserID: 7}, Out: false,
+				},
+			},
+		},
+	})
+	want := "Nguyễn Văn A"
+	if got.Sender != want {
+		t.Errorf("Sender = %q, want %q (both names must be shown)", got.Sender, want)
+	}
+}

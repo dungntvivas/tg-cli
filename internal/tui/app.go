@@ -15,6 +15,12 @@ import (
 	"github.com/user/tgchat/internal/telegram"
 )
 
+// chatHeaderPrefix labels the one-line banner above the chat pane so the
+// user always knows which conversation they're reading. The same shape
+// covers P2P partner, group, and bot — only the dialog's own Title
+// differs (set via setChatHeader from openByArgs).
+const chatHeaderPrefix = "chat - "
+
 // App holds the tview Application and our state.
 type App struct {
 	tv           *tview.Application
@@ -121,7 +127,7 @@ func (a *App) build(selfName string) {
 	// (group title, partner name, or @username). Helps the user orient
 	// which chat they're in when the sidebar is hidden or they're mid-scroll.
 	a.chatHeader = tview.NewTextView().
-		SetText(chatPrefix + "(no chat open)").
+		SetText(chatHeaderPrefix + "(no chat open)").
 		SetTextColor(accent)
 	a.chatHeader.SetBorder(false)
 
@@ -434,7 +440,7 @@ func (a *App) setChatHeader(title string) {
 	if title == "" {
 		title = "(no chat open)"
 	}
-	a.chatHeader.SetText(chatPrefix + title)
+	a.chatHeader.SetText(chatHeaderPrefix + title)
 }
 
 func (a *App) loadHistory(limit int) {
