@@ -161,7 +161,7 @@ func (a *App) build(selfName string) {
 		AddItem(a.chat, 0, 4, false).
 		AddItem(a.input, 3, 1, true)
 	a.body = tview.NewFlex().SetDirection(tview.FlexColumn).
-		AddItem(a.sidebar, 24, 0, true).
+		AddItem(a.sidebar, 36, 0, true).
 		AddItem(a.right, 0, 1, false)
 
 	root := tview.NewFlex().SetDirection(tview.FlexRow).
@@ -306,7 +306,7 @@ func (a *App) toggleSidebar() {
 		a.toast("sidebar hidden (F10 to show)")
 	} else {
 		a.body.Clear()
-		a.body.AddItem(a.sidebar, 24, 0, true)
+		a.body.AddItem(a.sidebar, 36, 0, true)
 		a.body.AddItem(a.right, 0, 1, false)
 		a.sidebarShown = true
 		a.tv.SetFocus(a.sidebar)
