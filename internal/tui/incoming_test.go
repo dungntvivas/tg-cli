@@ -3,6 +3,7 @@ package tui
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,6 +24,7 @@ func newTestApp(dialogs []telegram.Dialog) (*App, *telegram.FakeAPI) {
 	}
 	a := &App{
 		chat:       tview.NewTextView(),
+		chatHeader: tview.NewTextView(),
 		sidebar:    tview.NewList(),
 		api:        api,
 		ctx:        context.Background(),
@@ -157,12 +159,13 @@ func TestLoadHistory_CallsMarkReadAndRefreshesDialogs(t *testing.T) {
 		},
 	}
 	a := &App{
-		chat:    tview.NewTextView(),
-		sidebar: tview.NewList(),
-		api:     api,
-		ctx:     context.Background(),
-		dialogs: dialogs,
-		activeIdx: 0,
+		chat:       tview.NewTextView(),
+		chatHeader: tview.NewTextView(),
+		sidebar:    tview.NewList(),
+		api:        api,
+		ctx:        context.Background(),
+		dialogs:    dialogs,
+		activeIdx:  0,
 	}
 	a.loadHistory(50)
 	if historyCalls != 1 {
@@ -195,16 +198,49 @@ func TestLoadHistory_MarkReadFailureDoesNotBlockUI(t *testing.T) {
 		},
 	}
 	a := &App{
-		chat:    tview.NewTextView(),
-		sidebar: tview.NewList(),
-		status:  tview.NewTextView(),
-		api:     api,
-		ctx:     context.Background(),
-		dialogs: dialogs,
-		activeIdx: 0,
+		chat:       tview.NewTextView(),
+		chatHeader: tview.NewTextView(),
+		sidebar:    tview.NewList(),
+		status:     tview.NewTextView(),
+		api:        api,
+		ctx:        context.Background(),
+		dialogs:    dialogs,
+		activeIdx:  0,
 	}
 	a.loadHistory(50)
 	if len(a.messages) != 1 {
 		t.Errorf("messages = %+v, want 1 entry (mark-read failure should not block UI)", a.messages)
 	}
+}
+
+// TestSetChatHeader_UpdatesTitle covers the one-line banner above the
+// chat pane: opening a dialog must show "chat - <title>" so the user
+// always knows which conversation they're reading.
+func TestSetChatHeader_UpdatesTitle(t *testing.T) {
+	a := &App{chatHeader: tview.NewTextView()}
+	a.setChatHeader("Alice")
+	if got := a.chatHeader.GetText(true); got != chatPrefix+"Alice" {
+		t.Errorf("header text = %q, want %q", got, chatPrefix+"Alice")
+	}
+}
+
+// TestSetChatHeader_EmptyFallsBackToPlaceholder: an unset title shouldn't
+// render as a dangling "chat - " — show "(no chat open)" so the layout
+// stays stable before any dialog is opened.
+func TestSetChatHeader_EmptyFallsBackToPlaceholder(t *testing.T) {
+	a := &App{chatHeader: tview.NewTextView()}
+	a.setChatHeader("")
+	if got := a.chatHeader.GetText(true); !strings.Contains(got, "(no chat open)") {
+		t.Errorf("header text = %q, want placeholder for empty title", got)
+	}
+}
+
+// TestSetChatHeader_NilSafe: build order matters — loadHistory can be
+// reached before chatHeader is wired in some paths. setChatHeader must
+// no-op instead of panicking so future refactors can change the init
+// order without breaking the chat path.
+func TestSetChatHeader_NilSafe(t *testing.T) {
+	a := &App{}
+	// Should not panic.
+	a.setChatHeader("Alice")
 }

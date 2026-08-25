@@ -21,10 +21,11 @@ type App struct {
 	header       *tview.TextView
 	sidebar      *tview.List
 	chat         *tview.TextView
+	chatHeader   *tview.TextView // one-line "chat - X" header above the chat pane
 	input        *tview.InputField
 	status       *tview.TextView
 	body         *tview.Flex
-	right        *tview.Flex // chat-over-input pane, child of body
+	right        *tview.Flex // chat-header-over-chat-over-input pane, child of body
 	api          telegram.API
 	dialogs      []telegram.Dialog
 	activeIdx    int
@@ -116,6 +117,14 @@ func (a *App) build(selfName string) {
 		SetTitleColor(accent).
 		SetBorderColor(muted)
 
+	// Chat header: one-line banner showing the active dialog's identity
+	// (group title, partner name, or @username). Helps the user orient
+	// which chat they're in when the sidebar is hidden or they're mid-scroll.
+	a.chatHeader = tview.NewTextView().
+		SetText(chatPrefix + "(no chat open)").
+		SetTextColor(accent)
+	a.chatHeader.SetBorder(false)
+
 	// Chat: scrollable, dynamic colors so FormatMessage can colorize senders.
 	// Word wrap is disabled because formatOutgoing pre-wraps long outgoing
 	// lines for right-alignment; letting tview re-wrap would break the
@@ -158,6 +167,7 @@ func (a *App) build(selfName string) {
 
 	// Layout: header on top, main row (sidebar | (chat over input)), status at bottom.
 	a.right = tview.NewFlex().SetDirection(tview.FlexRow).
+		AddItem(a.chatHeader, 1, 0, false).
 		AddItem(a.chat, 0, 4, false).
 		AddItem(a.input, 3, 1, true)
 	a.body = tview.NewFlex().SetDirection(tview.FlexColumn).
@@ -407,8 +417,24 @@ func (a *App) openByArgs(args []string) {
 	a.activeIdx = idx
 	d := a.dialogs[idx]
 	a.sidebar.SetCurrentItem(idx)
+	a.setChatHeader(d.Title)
 	a.toast(fmt.Sprintf("opened %s", d.Title))
 	a.loadHistory(50)
+}
+
+// setChatHeader updates the one-line banner above the chat pane to
+// "chat - <title>" so the user always knows which conversation they're
+// reading, even when the sidebar is hidden (F10) or scrolled away. Safe
+// to call before chatHeader is initialized — the build path sets a
+// placeholder, and loadHistory only runs after a dialog has been opened.
+func (a *App) setChatHeader(title string) {
+	if a.chatHeader == nil {
+		return
+	}
+	if title == "" {
+		title = "(no chat open)"
+	}
+	a.chatHeader.SetText(chatPrefix + title)
 }
 
 func (a *App) loadHistory(limit int) {
