@@ -13,6 +13,7 @@ type Dialog struct {
 	Kind       string // "user", "group", or "channel" — needed by TUI to know peer type
 	Title      string
 	Unread     int
+	Muted      bool // server-side notifications muted (NotifySettings.MuteUntil in the future) — TUI skips Windows pushes for these
 	LastMsg    string
 	LastTime   time.Time
 	AccessHash int64 // required to address users/channels via the API

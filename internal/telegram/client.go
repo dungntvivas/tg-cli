@@ -291,11 +291,18 @@ func (c *Client) dialogFromGotd(ctx context.Context, d tg.Dialog, users map[int6
 	if err != nil {
 		return Dialog{}, err
 	}
+	// Muted mirrors the user's per-dialog notification setting: mute_until is
+	// a unix timestamp, muted while it's in the future.
+	muted := false
+	if mu, ok := d.NotifySettings.GetMuteUntil(); ok && mu > int(time.Now().Unix()) {
+		muted = true
+	}
 	return Dialog{
 		ID:         peerID(d.Peer),
 		Kind:       peerKind(d.Peer),
 		Title:      title,
 		Unread:     d.UnreadCount,
+		Muted:      muted,
 		AccessHash: c.accessHash(d.Peer, users, chats),
 	}, nil
 }

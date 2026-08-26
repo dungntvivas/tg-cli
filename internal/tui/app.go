@@ -109,8 +109,22 @@ func (a *App) handleIncoming(m telegram.Message) {
 		return
 	}
 	// Non-active chat — refresh the sidebar so it shows the new last
-	// message preview and bumps the unread count.
+	// message preview and bumps the unread count, then push a local
+	// Windows toast. Dialogs muted in Telegram settings (NotifySettings
+	// mute_until in the future) are skipped — respect the user's own
+	// server-side notification choices. Runs off-goroutine: spawning
+	// powershell takes ~100ms+ and must not stall the UI thread.
 	a.refreshDialogs()
+	title, muted := m.Sender, false
+	for _, d := range a.dialogs {
+		if d.ID == m.PeerID && d.Kind == m.PeerKind {
+			title, muted = d.Title, d.Muted
+			break
+		}
+	}
+	if !muted {
+		go pushNotify(title, TruncateText(strings.ReplaceAll(m.Text, "\n", " "), 120))
+	}
 }
 
 func (a *App) build(selfName string) {
