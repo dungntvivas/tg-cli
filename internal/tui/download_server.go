@@ -43,7 +43,9 @@ func startDownloadServer(ctx context.Context, api telegram.API) (string, error) 
 		<-ctx.Done()
 		srv.Close()
 	}()
-	return "http://127.0.0.1:" + strconv.Itoa(ln.Addr().(*net.TCPAddr).Port), nil
+	// The base URL carries the /dl/<token> prefix: openDownloadLink appends
+	// only /<kind>/<peer>/<msg>, so every link it builds is pre-authorized.
+	return "http://127.0.0.1:" + strconv.Itoa(ln.Addr().(*net.TCPAddr).Port) + "/dl/" + s.token, nil
 }
 
 // randToken returns a 128-bit random hex string — the per-session secret.

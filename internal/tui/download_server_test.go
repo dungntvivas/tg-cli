@@ -99,3 +99,35 @@ func TestStartDownloadServer_ListensLoopback(t *testing.T) {
 		t.Errorf("status = %d, want 404 (bad token)", resp.StatusCode)
 	}
 }
+
+// TestStartDownloadServer_BaseURLOpensFile is the END-TO-END regression for
+// the 404-on-click bug: openDownloadLink builds its URL as
+// "<base>/<kind>/<peer>/<msg>" — the returned base MUST therefore already
+// carry the /dl/<token> prefix, or every click lands on the token guard.
+func TestStartDownloadServer_BaseURLOpensFile(t *testing.T) {
+	api := &telegram.FakeAPI{
+		StatFn: func(ctx context.Context, peer telegram.Peer, msgID int64) (telegram.MediaInfo, error) {
+			return telegram.MediaInfo{Name: "f.bin", Size: 2}, nil
+		},
+		DownloadFn: func(ctx context.Context, peer telegram.Peer, msgID int64, w io.Writer) (telegram.MediaInfo, error) {
+			w.Write([]byte("ok"))
+			return telegram.MediaInfo{Name: "f.bin", Size: 2}, nil
+		},
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	base, err := startDownloadServer(ctx, api)
+	if err != nil {
+		t.Fatalf("startDownloadServer: %v", err)
+	}
+	// Exactly the URL shape openDownloadLink produces.
+	resp, err := http.Get(base + "/user/7/42")
+	if err != nil {
+		t.Fatalf("GET %s: %v", base, err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || string(body) != "ok" {
+		t.Errorf("GET %s/user/7/42 = %d %q, want 200 \"ok\"", base, resp.StatusCode, body)
+	}
+}
