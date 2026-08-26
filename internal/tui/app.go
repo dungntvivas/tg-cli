@@ -46,6 +46,9 @@ type App struct {
 	// appended to `messages`.
 	activePeer telegram.Peer
 	messages  []telegram.Message
+	// dlBase is the loopback download server's tokened base URL
+	// (http://127.0.0.1:<port>/dl/<token>); empty when the server failed to start.
+	dlBase string
 }
 
 // cursorPos is a 1-based (line, col) position in display cells.
@@ -63,6 +66,11 @@ func Run(ctx context.Context, api telegram.API, selfName string) error {
 		sidebarShown: true,
 	}
 	app.build(selfName)
+	// Loopback download server: chat-pane media links point here. Failure is
+	// non-fatal — links just toast "unavailable" when clicked.
+	if base, err := startDownloadServer(ctx, api); err == nil {
+		app.dlBase = base
+	}
 	// Subscribe to live updates BEFORE the tview loop starts so the
 	// handler is wired before any update arrives. The handler hops onto
 	// the UI goroutine via QueueUpdateDraw — OnMessage itself runs on
@@ -123,7 +131,7 @@ func (a *App) handleIncoming(m telegram.Message) {
 		}
 	}
 	if !muted {
-		go pushNotify(title, TruncateText(strings.ReplaceAll(m.Text, "\n", " "), 120))
+		go pushNotify(title, notifyBody(m))
 	}
 }
 
@@ -172,6 +180,15 @@ func (a *App) build(selfName string) {
 		SetTitle(" Chat ").
 		SetTitleColor(accent).
 		SetBorderColor(muted)
+	// Clicking a ["dl:..."] region (rendered by downloadLine) opens the
+	// browser on that file's loopback URL. The highlight is cleared right
+	// away so clicking the same link again re-fires.
+	a.chat.SetHighlightedFunc(func(added, removed, remaining []string) {
+		if len(added) > 0 && strings.HasPrefix(added[0], "dl:") {
+			a.openDownloadLink(added[0])
+			a.chat.Highlight()
+		}
+	})
 
 	// Input: framed box with cyan prompt label, full width (FieldWidth=0).
 	// tview's selectedStyle paints a PrimaryTextColor background when the

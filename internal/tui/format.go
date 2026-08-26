@@ -2,6 +2,7 @@
 package tui
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/rivo/uniseg"
@@ -55,19 +56,41 @@ func FormatMessage(msg telegram.Message, width int) string {
 // same column as the first body line.
 func formatColored(msg telegram.Message, width int, senderColor, senderName string) string {
 	header := senderColor + senderColumn(senderName) + resetMarkup
+	body := msg.Text
+	if isDownloadable(msg) {
+		body = downloadLine(msg)
+	}
 	if width <= senderColWidth {
 		// No wrap before layout / on too-narrow panes. Emit header + raw body.
-		return header + "\n" + msg.Text
+		return header + "\n" + body
 	}
 	bodyW := width - senderColWidth
 	var lines []string
-	for _, seg := range strings.Split(msg.Text, "\n") {
+	for _, seg := range strings.Split(body, "\n") {
 		// User \n is a hard break — wrap each segment independently.
 		for _, w := range wrapGraphemes(seg, bodyW) {
 			lines = append(lines, blankCol+w)
 		}
 	}
 	return header + "\n" + strings.Join(lines, "\n")
+}
+
+// isDownloadable reports whether the message renders as a click-to-download
+// link instead of its (empty) text body: media attachments only, and never
+// the negative placeholder IDs of optimistic local sends.
+func isDownloadable(msg telegram.Message) bool {
+	return msg.Media != "" && msg.Text == "" && msg.ID > 0
+}
+
+// downloadLine renders an attachment as a tview region named
+// dl:<kind>:<peerID>:<msgID> — app.go's highlighted-func turns a click on
+// that region into a browser download through the loopback server.
+func downloadLine(msg telegram.Message) string {
+	label := mediaGlyph(msg)
+	if label == "" {
+		label = "tệp đính kèm"
+	}
+	return fmt.Sprintf(`["dl:%s:%d:%d"]%s · %s[""]`, msg.PeerKind, msg.PeerID, msg.ID, label, "click để tải ⬇")
 }
 
 // senderColumn returns `name` formatted to exactly `senderColWidth` display

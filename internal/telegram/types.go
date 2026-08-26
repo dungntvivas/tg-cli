@@ -4,8 +4,16 @@ package telegram
 
 import (
 	"context"
+	"io"
 	"time"
 )
+
+// MediaInfo describes a downloadable attachment — enough for HTTP headers
+// (filename + byte length) before streaming starts.
+type MediaInfo struct {
+	Name string
+	Size int64
+}
 
 // Dialog is one conversation in the user's dialog list.
 type Dialog struct {
@@ -30,6 +38,10 @@ type Message struct {
 	PeerKind string // "user", "group", or "channel" — matches Peer.Kind
 	Sender   string // display name; "You" if Outgoing
 	Text     string
+	// Media describes non-text content for surfaces that can't render it
+	// (desktop toasts, previews): "" for plain text, else a kind keyword
+	// ("photo", "voice", "video", ...) or the filename of a named document.
+	Media    string
 	Time     time.Time
 	Outgoing bool
 }
@@ -50,6 +62,10 @@ type API interface {
 	// MarkRead notifies the server that all messages in `peer` are read.
 	// TUI calls this when opening a dialog so the unread badge clears.
 	MarkRead(ctx context.Context, peer Peer) error
+	// Stat describes the media attached to message msgID in peer.
+	Stat(ctx context.Context, peer Peer, msgID int64) (MediaInfo, error)
+	// Download streams that media into w (no full-file buffering).
+	Download(ctx context.Context, peer Peer, msgID int64, w io.Writer) (MediaInfo, error)
 	// OnMessage registers a callback fired for each newly-received message.
 	// Multiple calls replace the previous handler. The handler is called from
 	// gotd's update goroutine — implementations must not block.
@@ -62,7 +78,23 @@ type FakeAPI struct {
 	HistoryFn   func(ctx context.Context, peer Peer, limit int) ([]Message, error)
 	SendFn      func(ctx context.Context, peer Peer, text string) (Message, error)
 	MarkReadFn  func(ctx context.Context, peer Peer) error
+	StatFn      func(ctx context.Context, peer Peer, msgID int64) (MediaInfo, error)
+	DownloadFn  func(ctx context.Context, peer Peer, msgID int64, w io.Writer) (MediaInfo, error)
 	OnMessageFn func(handler func(Message))
+}
+
+func (f *FakeAPI) Stat(ctx context.Context, peer Peer, msgID int64) (MediaInfo, error) {
+	if f.StatFn == nil {
+		return MediaInfo{}, nil
+	}
+	return f.StatFn(ctx, peer, msgID)
+}
+
+func (f *FakeAPI) Download(ctx context.Context, peer Peer, msgID int64, w io.Writer) (MediaInfo, error) {
+	if f.DownloadFn == nil {
+		return MediaInfo{}, nil
+	}
+	return f.DownloadFn(ctx, peer, msgID, w)
 }
 
 func (f *FakeAPI) Dialogs(ctx context.Context) ([]Dialog, error) {

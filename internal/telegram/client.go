@@ -408,6 +408,7 @@ func (c *Client) messageFromGotd(ctx context.Context, m *tg.Message, users map[i
 			ID:       int64(m.ID),
 			Sender:   "You",
 			Text:     m.Message,
+			Media:    mediaLabel(m.Media),
 			Time:     time.Unix(int64(m.Date), 0),
 			Outgoing: true,
 		}
@@ -417,8 +418,50 @@ func (c *Client) messageFromGotd(ctx context.Context, m *tg.Message, users map[i
 		ID:       int64(m.ID),
 		Sender:   sender,
 		Text:     m.Message,
+		Media:    mediaLabel(m.Media),
 		Time:     time.Unix(int64(m.Date), 0),
 		Outgoing: false,
+	}
+}
+
+// mediaLabel summarizes a message's attachment in one short token so text-less
+// surfaces (Windows toasts) can say what arrived instead of showing blank.
+// Named documents keep their filename — far more useful than a bare "file".
+// Returns "" when the message is plain text.
+func mediaLabel(media tg.MessageMediaClass) string {
+	switch v := media.(type) {
+	case nil:
+		return "" // plain text
+	case *tg.MessageMediaPhoto:
+		return "photo"
+	case *tg.MessageMediaDocument:
+		doc, ok := v.Document.(*tg.Document)
+		if !ok {
+			return "file" // DocumentEmpty / unsupported wrapper
+		}
+		for _, attr := range doc.Attributes {
+			switch a := attr.(type) {
+			case *tg.DocumentAttributeFilename:
+				return a.FileName
+			case *tg.DocumentAttributeAudio:
+				if a.Voice {
+					return "voice"
+				}
+				return "audio"
+			case *tg.DocumentAttributeVideo:
+				if a.RoundMessage {
+					return "video_note"
+				}
+				return "video"
+			case *tg.DocumentAttributeSticker:
+				return "sticker"
+			case *tg.DocumentAttributeAnimated:
+				return "gif"
+			}
+		}
+		return "file"
+	default:
+		return "media" // geo, poll, contact, ... — something non-text at least
 	}
 }
 
