@@ -9,6 +9,7 @@ import (
 
 	"github.com/user/tgchat/internal/auth"
 	"github.com/user/tgchat/internal/config"
+	"github.com/user/tgchat/internal/filesync"
 	"github.com/user/tgchat/internal/media"
 	"github.com/user/tgchat/internal/telegram"
 	"github.com/user/tgchat/internal/tui"
@@ -72,6 +73,14 @@ func run() error {
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "download server unavailable:", err)
 		}
+		// Filesync mirrors recent chats as editable files. It runs alongside
+		// the TUI in this process on purpose: a second process would race on
+		// session.json and desync Telegram's update cursors.
+		go func() {
+			if err := filesync.Run(ctx, client, base, cfg.ChatDir); err != nil {
+				fmt.Fprintln(os.Stderr, "filesync disabled:", err)
+			}
+		}()
 		return tui.Run(ctx, client, selfName, base)
 	})
 }

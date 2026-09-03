@@ -12,6 +12,7 @@ type Config struct {
 	AppID      int
 	APIHash    string
 	SessionDir string
+	ChatDir    string // where filesync mirrors conversations as files
 }
 
 func Load() (Config, error) {
@@ -36,5 +37,9 @@ func Load() (Config, error) {
 		}
 		dir = filepath.Join(home, ".local", "share", "tgchat")
 	}
-	return Config{AppID: appID, APIHash: apiHash, SessionDir: dir}, nil
+	chatDir := os.Getenv("TG_CHAT_DIR")
+	if chatDir == "" {
+		chatDir = filepath.Join(dir, "chats")
+	}
+	return Config{AppID: appID, APIHash: apiHash, SessionDir: dir, ChatDir: chatDir}, nil
 }

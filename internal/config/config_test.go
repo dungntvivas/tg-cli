@@ -80,3 +80,28 @@ func TestLoad_InvalidAppID(t *testing.T) {
 		t.Fatal("expected error for non-numeric TG_APP_ID, got nil")
 	}
 }
+// TestLoad_ChatDir: filesync's folder defaults next to the session but must
+// be relocatable — users keep it inside a workspace they already have open.
+func TestLoad_ChatDir(t *testing.T) {
+	t.Setenv("TG_APP_ID", "123")
+	t.Setenv("TG_API_HASH", "hash")
+	t.Setenv("TG_SESSION_DIR", filepath.Join("C:", "data", "tgchat"))
+
+	t.Setenv("TG_CHAT_DIR", "")
+	cfg, err := Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if want := filepath.Join("C:", "data", "tgchat", "chats"); cfg.ChatDir != want {
+		t.Errorf("ChatDir = %q, want %q", cfg.ChatDir, want)
+	}
+
+	t.Setenv("TG_CHAT_DIR", filepath.Join("D:", "work", "chats"))
+	cfg, err = Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if want := filepath.Join("D:", "work", "chats"); cfg.ChatDir != want {
+		t.Errorf("ChatDir = %q, want %q", cfg.ChatDir, want)
+	}
+}
