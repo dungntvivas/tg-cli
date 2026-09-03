@@ -22,6 +22,7 @@ type Dialog struct {
 	Title      string
 	Unread     int
 	Muted      bool // server-side notifications muted (NotifySettings.MuteUntil in the future) — TUI skips Windows pushes for these
+	Bot        bool // peer is a bot account — filesync skips these, they are noise in a folder of conversations
 	LastMsg    string
 	LastTime   time.Time
 	AccessHash int64 // required to address users/channels via the API

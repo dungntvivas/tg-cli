@@ -20,8 +20,9 @@ runs skip auth.
 
 ## Filesync mode
 
-The 20 most recent conversations are mirrored as `.md` files so you can read and reply from
-any editor. Open the folder in VS Code and `Ctrl+Shift+F` searches every chat at once.
+The 50 most recent conversations are mirrored as `.md` files so you can read and reply from
+any editor. Open the folder in VS Code and `Ctrl+Shift+F` searches every chat at once. Bot
+chats are skipped — they are notification feeds, not conversations.
 
     %USERPROFILE%\.local\share\tgchat\chats\Nam.md
 

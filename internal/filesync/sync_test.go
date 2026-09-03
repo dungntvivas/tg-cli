@@ -185,3 +185,68 @@ func waitFor(t *testing.T, cond func() bool) {
 	}
 	t.Fatal("condition not met within 3s")
 }
+
+// TestRun_SkipsBotDialogs: bot chats are notification feeds, not
+// conversations — they would bury the real chats in the folder.
+func TestRun_SkipsBotDialogs(t *testing.T) {
+	dir := t.TempDir()
+	api := dumpAPI(
+		[]telegram.Dialog{
+			{ID: 88, Kind: "user", Title: "Nam", LastTime: time.Now()},
+			{ID: 77, Kind: "user", Title: "GitHubBot", Bot: true, LastTime: time.Now().Add(-time.Minute)},
+		},
+		map[int64][]telegram.Message{
+			88: {{ID: 1, Sender: "Nam", Text: "chào"}},
+			77: {{ID: 2, Sender: "GitHubBot", Text: "build passed"}},
+		},
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go Run(ctx, api, "", dir)
+	waitForFile(t, filepath.Join(dir, "Nam.md"))
+	time.Sleep(50 * time.Millisecond)
+
+	if _, err := os.Stat(filepath.Join(dir, "GitHubBot.md")); err == nil {
+		t.Error("bot dialog was mirrored, want it skipped")
+	}
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 {
+		t.Errorf("dir has %d files, want only the human conversation", len(entries))
+	}
+}
+
+// TestRun_BotMessagesAreIgnored: a bot's live updates must not resurrect it
+// as a file either.
+func TestRun_BotMessagesAreIgnored(t *testing.T) {
+	dir := t.TempDir()
+	registered := make(chan func(telegram.Message), 1)
+	api := dumpAPI(
+		[]telegram.Dialog{
+			{ID: 88, Kind: "user", Title: "Nam", LastTime: time.Now()},
+			{ID: 77, Kind: "user", Title: "GitHubBot", Bot: true, LastTime: time.Now().Add(-time.Minute)},
+		},
+		map[int64][]telegram.Message{88: nil, 77: nil},
+	)
+	api.OnMessageFn = func(h func(telegram.Message)) { registered <- h }
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go Run(ctx, api, "", dir)
+	handler := <-registered
+
+	handler(telegram.Message{ID: 9, PeerID: 77, PeerKind: "user", Sender: "GitHubBot", Text: "build passed"})
+	time.Sleep(50 * time.Millisecond)
+
+	entries, _ := os.ReadDir(dir)
+	if len(entries) != 1 {
+		t.Errorf("dir has %d files, want only the human conversation", len(entries))
+	}
+}
+
+// TestMaxDialogs pins the cap: 50 is what the user asked for, and a silent
+// drop back to a smaller number would quietly hide conversations.
+func TestMaxDialogs(t *testing.T) {
+	if maxDialogs != 50 {
+		t.Errorf("maxDialogs = %d, want 50", maxDialogs)
+	}
+}

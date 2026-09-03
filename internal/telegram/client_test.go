@@ -181,3 +181,37 @@ func TestDialogFromGotd_MutedFromNotifySettings(t *testing.T) {
 		})
 	}
 }
+
+// TestDialogFromGotd_BotFlag verifies Dialog.Bot mirrors tg.User.Bot, so
+// consumers can filter bot conversations out. Groups and channels are never
+// bots.
+func TestDialogFromGotd_BotFlag(t *testing.T) {
+	c := &Client{}
+	ctx := context.Background()
+	users := map[int64]*tg.User{
+		1: {ID: 1, FirstName: "Nam"},
+		2: {ID: 2, FirstName: "SomeBot", Bot: true},
+	}
+	chats := map[int64]tg.ChatClass{5: &tg.Chat{ID: 5, Title: "Group"}}
+
+	cases := []struct {
+		name string
+		peer tg.PeerClass
+		want bool
+	}{
+		{"human user", &tg.PeerUser{UserID: 1}, false},
+		{"bot user", &tg.PeerUser{UserID: 2}, true},
+		{"group is never a bot", &tg.PeerChat{ChatID: 5}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, err := c.dialogFromGotd(ctx, tg.Dialog{Peer: tc.peer}, users, chats)
+			if err != nil {
+				t.Fatalf("dialogFromGotd: %v", err)
+			}
+			if got.Bot != tc.want {
+				t.Errorf("Bot = %v, want %v", got.Bot, tc.want)
+			}
+		})
+	}
+}

@@ -16,7 +16,7 @@ const (
 	// maxDialogs bounds the startup fan-out: an account with hundreds of
 	// dialogs would otherwise fire hundreds of History calls and trip
 	// Telegram's flood-wait.
-	maxDialogs = 20
+	maxDialogs = 50
 	// historyDepth is enough context to follow a conversation while keeping
 	// the file small enough for an editor to open instantly.
 	historyDepth = 200
@@ -51,6 +51,15 @@ func Run(ctx context.Context, api telegram.API, dlBase, dir string) error {
 	if err != nil {
 		return fmt.Errorf("list dialogs: %w", err)
 	}
+	// Bots are notification feeds, not conversations — filtering them before
+	// the cap means they don't eat slots from real chats either.
+	kept := dialogs[:0]
+	for _, d := range dialogs {
+		if !d.Bot {
+			kept = append(kept, d)
+		}
+	}
+	dialogs = kept
 	sort.Slice(dialogs, func(i, j int) bool {
 		return dialogs[i].LastTime.After(dialogs[j].LastTime)
 	})

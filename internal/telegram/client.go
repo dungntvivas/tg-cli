@@ -300,12 +300,21 @@ func (c *Client) dialogFromGotd(ctx context.Context, d tg.Dialog, users map[int6
 	if mu, ok := d.NotifySettings.GetMuteUntil(); ok && mu > int(time.Now().Unix()) {
 		muted = true
 	}
+	// Only user peers can be bots; the bundled User object already carries
+	// the flag, so no extra API call is needed.
+	bot := false
+	if pu, ok := d.Peer.(*tg.PeerUser); ok {
+		if u, ok := users[pu.UserID]; ok {
+			bot = u.Bot
+		}
+	}
 	return Dialog{
 		ID:         peerID(d.Peer),
 		Kind:       peerKind(d.Peer),
 		Title:      title,
 		Unread:     d.UnreadCount,
 		Muted:      muted,
+		Bot:        bot,
 		AccessHash: c.accessHash(d.Peer, users, chats),
 	}, nil
 }

@@ -121,7 +121,8 @@ Conversely filesync only ever *clears* the compose area, after a successful send
 
 ### Data flow
 
-**Startup.** `Dialogs(ctx)` → keep the 20 with the newest `LastTime` → for each,
+**Startup.** `Dialogs(ctx)` → drop bot conversations (`Dialog.Bot`, from `tg.User.Bot`) →
+keep the 50 with the newest `LastTime` → for each,
 `History(peer, 200)` → write the file. The synced set is fixed for the process lifetime;
 a dialog that becomes active later shows up in the folder on the next restart. Muted dialogs are included: mute suppresses toasts, not reading.
 
@@ -182,7 +183,7 @@ conventions:
 
 | Decision | Value | Rationale |
 |---|---|---|
-| Dialogs synced | 20 most recent | Avoids flood-wait on accounts with hundreds of dialogs |
+| Dialogs synced | 50 most recent, bots excluded | Bounds startup fan-out against flood-wait; bots are notification feeds, not conversations |
 | History depth | 200 messages | Enough to have context, bounded file size |
 | Poll interval | 500ms | Below human perception for a save-to-send round trip |
 | Compose granularity | whole area = one message | Matches "add a line = send a message" for the common case |
