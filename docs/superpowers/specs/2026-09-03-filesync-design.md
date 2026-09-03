@@ -101,6 +101,22 @@ Three files, each with one job:
   `dlServer` link the TUI uses. `Ctrl+click` in VS Code opens it; the browser saves the file.
 - Everything after the marker line is the compose area
 
+### Editor workspace
+
+On startup filesync writes `<dir>/.vscode/settings.json`, unless one already exists:
+
+- `explorer.sortOrder: "modified"` — puts the active conversation on top. mtime already
+  tracks recency because filesync rewrites a file whenever that chat moves, so no file has
+  to be renamed; renaming would break open editor tabs.
+- `files.saveConflictResolution: "overwriteFileOnDisk"` — without it VS Code refuses to save
+  any file filesync rewrote while the user was typing, and keeps refusing until the user
+  resolves the conflict by hand. Overwriting is safe here *only* because of the invariant
+  below: memory owns the log, so an overwritten log is repaired by the next write.
+
+The initial dump backdates each file's mtime to the dialog's `LastTime`. Without that the
+dump order (newest first) would give the freshest chat the oldest mtime of the batch, and
+the explorer would sort exactly backwards.
+
 ### Naming
 
 `<dir>/<sanitised title>.md`. Windows-forbidden characters `\ / : * ? " < > |` become `_`.

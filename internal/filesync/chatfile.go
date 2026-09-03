@@ -130,3 +130,18 @@ func (c *chatFile) checkAndSend(ctx context.Context, api telegram.API, dlBase st
 	c.msgs = append(c.msgs, sent)
 	c.writeWithDraft(dlBase, "")
 }
+
+// setMtime backdates the file and records the new timestamp, so the poll
+// loop's "did the user save?" check still compares against what is actually
+// on disk. Caller holds c.mu.
+func (c *chatFile) setMtime(t time.Time) error {
+	if err := os.Chtimes(c.path, t, t); err != nil {
+		return err
+	}
+	fi, err := os.Stat(c.path)
+	if err != nil {
+		return err
+	}
+	c.mtime = fi.ModTime()
+	return nil
+}

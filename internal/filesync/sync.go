@@ -47,6 +47,10 @@ func Run(ctx context.Context, api telegram.API, dlBase, dir string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return fmt.Errorf("create chat dir: %w", err)
 	}
+	if err := writeEditorSettings(dir); err != nil {
+		// Cosmetic only — the mirror works, the explorer just sorts by name.
+		log.Printf("filesync: editor settings: %v", err)
+	}
 	dialogs, err := api.Dialogs(ctx)
 	if err != nil {
 		return fmt.Errorf("list dialogs: %w", err)
@@ -73,7 +77,7 @@ func Run(ctx context.Context, api telegram.API, dlBase, dir string) error {
 		peer := telegram.Peer{ID: d.ID, Kind: d.Kind, AccessHash: d.AccessHash}
 		msgs, err := api.History(ctx, peer, historyDepth)
 		if err != nil {
-			// One unreachable dialog must not cost the user the other 19.
+			// One unreachable dialog must not cost the user the rest.
 			log.Printf("filesync: history %q: %v", d.Title, err)
 			continue
 		}
@@ -84,6 +88,13 @@ func Run(ctx context.Context, api telegram.API, dlBase, dir string) error {
 		}
 		c.mu.Lock()
 		err = c.writeWithDraft(dlBase, "")
+		if err == nil && !d.LastTime.IsZero() {
+			// Backdate to the conversation's own recency so the explorer's
+			// "sort by modified" is right from the first second. Without this
+			// the dump order (newest first) gives the freshest chat the
+			// OLDEST mtime of the batch — exactly backwards.
+			err = c.setMtime(d.LastTime)
+		}
 		c.mu.Unlock()
 		if err != nil {
 			log.Printf("filesync: write %q: %v", c.path, err)
@@ -128,4 +139,34 @@ func (s *syncer) poll(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// editorSettings configures the chat folder as a VS Code workspace.
+//
+// sortOrder "modified" is what puts the active conversation on top: filesync
+// touches a file whenever that chat moves, so mtime already tracks recency —
+// no need to rename files, which would break open editor tabs.
+//
+// saveConflictResolution "overwriteFileOnDisk" is safe here specifically
+// because of the chatFile invariant: memory owns the log, so a save that
+// overwrites a newer on-disk log is repaired by the next write. Without it
+// VS Code refuses to save any file we rewrote while the user was typing.
+const editorSettings = `{
+  "explorer.sortOrder": "modified",
+  "files.saveConflictResolution": "overwriteFileOnDisk"
+}
+`
+
+// writeEditorSettings drops the workspace settings in, without clobbering a
+// file the user has customised.
+func writeEditorSettings(dir string) error {
+	vs := filepath.Join(dir, ".vscode")
+	if err := os.MkdirAll(vs, 0o700); err != nil {
+		return err
+	}
+	path := filepath.Join(vs, "settings.json")
+	if _, err := os.Stat(path); err == nil {
+		return nil // the user's workspace, their settings
+	}
+	return os.WriteFile(path, []byte(editorSettings), 0o600)
 }

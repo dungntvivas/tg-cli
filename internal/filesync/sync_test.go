@@ -128,9 +128,8 @@ func TestRun_IgnoresUnsyncedPeer(t *testing.T) {
 	handler(telegram.Message{ID: 9, PeerID: 999, PeerKind: "user", Sender: "Ai đó", Text: "lạ"})
 	time.Sleep(50 * time.Millisecond)
 
-	entries, _ := os.ReadDir(dir)
-	if len(entries) != 1 {
-		t.Errorf("dir has %d files, want only the synced one", len(entries))
+	if n := mdCount(t, dir); n != 1 {
+		t.Errorf("dir has %d chat files, want only the synced one", n)
 	}
 }
 
@@ -209,9 +208,8 @@ func TestRun_SkipsBotDialogs(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, "GitHubBot.md")); err == nil {
 		t.Error("bot dialog was mirrored, want it skipped")
 	}
-	entries, _ := os.ReadDir(dir)
-	if len(entries) != 1 {
-		t.Errorf("dir has %d files, want only the human conversation", len(entries))
+	if n := mdCount(t, dir); n != 1 {
+		t.Errorf("dir has %d chat files, want only the human conversation", n)
 	}
 }
 
@@ -237,9 +235,8 @@ func TestRun_BotMessagesAreIgnored(t *testing.T) {
 	handler(telegram.Message{ID: 9, PeerID: 77, PeerKind: "user", Sender: "GitHubBot", Text: "build passed"})
 	time.Sleep(50 * time.Millisecond)
 
-	entries, _ := os.ReadDir(dir)
-	if len(entries) != 1 {
-		t.Errorf("dir has %d files, want only the human conversation", len(entries))
+	if n := mdCount(t, dir); n != 1 {
+		t.Errorf("dir has %d chat files, want only the human conversation", n)
 	}
 }
 
@@ -249,4 +246,128 @@ func TestMaxDialogs(t *testing.T) {
 	if maxDialogs != 50 {
 		t.Errorf("maxDialogs = %d, want 50", maxDialogs)
 	}
+}
+
+// TestRun_WritesEditorSettings: VS Code sorts the explorer alphabetically by
+// default, which buries the active conversation. Shipping a workspace
+// settings file is what makes "most recent on top" work without renaming
+// files on every message.
+func TestRun_WritesEditorSettings(t *testing.T) {
+	dir := t.TempDir()
+	api := dumpAPI(nil, nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go Run(ctx, api, "", dir)
+
+	settings := filepath.Join(dir, ".vscode", "settings.json")
+	waitForFile(t, settings)
+
+	b, _ := os.ReadFile(settings)
+	for _, want := range []string{`"explorer.sortOrder": "modified"`, `"files.saveConflictResolution": "overwriteFileOnDisk"`} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("settings.json missing %s:\n%s", want, b)
+		}
+	}
+}
+
+// TestRun_KeepsExistingEditorSettings: the folder is the user's workspace —
+// their own settings must survive a restart.
+func TestRun_KeepsExistingEditorSettings(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, ".vscode"), 0o700)
+	settings := filepath.Join(dir, ".vscode", "settings.json")
+	os.WriteFile(settings, []byte(`{"editor.fontSize": 20}`), 0o600)
+
+	api := dumpAPI([]telegram.Dialog{{ID: 88, Kind: "user", Title: "Nam", LastTime: time.Now()}},
+		map[int64][]telegram.Message{88: nil})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go Run(ctx, api, "", dir)
+	waitForFile(t, filepath.Join(dir, "Nam.md"))
+
+	b, _ := os.ReadFile(settings)
+	if string(b) != `{"editor.fontSize": 20}` {
+		t.Errorf("existing settings overwritten:\n%s", b)
+	}
+}
+
+// TestRun_FileMtimeMatchesLastMessage: "sort by modified" only orders the
+// folder correctly if mtime reflects the conversation's recency. The initial
+// dump writes newest-first, so without this the freshest chat would carry the
+// OLDEST mtime of the batch — exactly backwards.
+func TestRun_FileMtimeMatchesLastMessage(t *testing.T) {
+	dir := t.TempDir()
+	newest := time.Now().Add(-1 * time.Minute).Truncate(time.Second)
+	oldest := time.Now().Add(-48 * time.Hour).Truncate(time.Second)
+	api := dumpAPI(
+		[]telegram.Dialog{
+			{ID: 88, Kind: "user", Title: "Nam", LastTime: newest},
+			{ID: 55, Kind: "group", Title: "Cũ", LastTime: oldest},
+		},
+		map[int64][]telegram.Message{88: nil, 55: nil},
+	)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go Run(ctx, api, "", dir)
+	waitForFile(t, filepath.Join(dir, "Cũ.md"))
+
+	fiNew, err := os.Stat(filepath.Join(dir, "Nam.md"))
+	if err != nil {
+		t.Fatalf("stat Nam.md: %v", err)
+	}
+	fiOld, err := os.Stat(filepath.Join(dir, "Cũ.md"))
+	if err != nil {
+		t.Fatalf("stat Cũ.md: %v", err)
+	}
+	if !fiNew.ModTime().After(fiOld.ModTime()) {
+		t.Errorf("Nam mtime %v not after Cũ mtime %v — explorer would sort them backwards",
+			fiNew.ModTime(), fiOld.ModTime())
+	}
+	if d := fiNew.ModTime().Sub(newest); d > time.Second || d < -time.Second {
+		t.Errorf("Nam mtime = %v, want ≈ LastTime %v", fiNew.ModTime(), newest)
+	}
+}
+
+// TestRun_BackdatedMtimeDoesNotLookLikeAUserSave: the loop guard compares the
+// mtime we recorded after our own write. Backdating the file must update that
+// record too, or the very first poll mistakes it for an edit.
+func TestRun_BackdatedMtimeDoesNotLookLikeAUserSave(t *testing.T) {
+	dir := t.TempDir()
+	var sendCalls atomic.Int64
+	api := dumpAPI(
+		[]telegram.Dialog{{ID: 88, Kind: "user", Title: "Nam", LastTime: time.Now().Add(-time.Hour)}},
+		map[int64][]telegram.Message{88: {{ID: 1, Sender: "Nam", Text: "chào"}}},
+	)
+	api.SendFn = func(ctx context.Context, peer telegram.Peer, text string) (telegram.Message, error) {
+		sendCalls.Add(1)
+		return telegram.Message{ID: 2, Text: text}, nil
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go Run(ctx, api, "", dir)
+	waitForFile(t, filepath.Join(dir, "Nam.md"))
+
+	// Long enough for several poll ticks.
+	time.Sleep(3 * pollInterval)
+
+	if n := sendCalls.Load(); n != 0 {
+		t.Errorf("Send called %d times with no user edit, want 0", n)
+	}
+}
+
+// mdCount counts mirrored conversations, ignoring the .vscode settings
+// folder filesync also writes.
+func mdCount(t *testing.T, dir string) int {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read dir: %v", err)
+	}
+	n := 0
+	for _, e := range entries {
+		if !e.IsDir() && strings.HasSuffix(e.Name(), ".md") {
+			n++
+		}
+	}
+	return n
 }
