@@ -1,6 +1,7 @@
 package filesync
 
 import (
+	"context"
 	"os"
 	"strings"
 	"sync"
@@ -84,4 +85,48 @@ func (c *chatFile) add(m telegram.Message, dlBase string) error {
 	}
 	c.msgs = append(c.msgs, m)
 	return c.write(dlBase)
+}
+
+// checkAndSend looks for a user edit: when the file changed since our own
+// last write and the compose area is non-empty, the area is sent as one
+// message and then cleared.
+//
+// The mtime comparison is the loop guard. Our own writes change the file too,
+// and re-reading a draft we ourselves preserved would resend it forever.
+func (c *chatFile) checkAndSend(ctx context.Context, api telegram.API, dlBase string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	fi, err := os.Stat(c.path)
+	if err != nil {
+		// Deleted or unreadable — the folder is a view, so recreate it.
+		c.writeWithDraft(dlBase, "")
+		return
+	}
+	if fi.ModTime().Equal(c.mtime) {
+		return
+	}
+	b, err := os.ReadFile(c.path)
+	if err != nil {
+		return
+	}
+	draft := draftOf(string(b))
+	if draft == "" {
+		// Saved without composing anything; adopt the mtime so we stop
+		// re-reading the file on every tick.
+		c.mtime = fi.ModTime()
+		return
+	}
+	sent, err := api.Send(ctx, c.peer, draft)
+	if err != nil {
+		// Keep the draft so saving again retries, and put the failure where
+		// the user is already looking.
+		c.msgs = append(c.msgs, telegram.Message{
+			Sender: "⚠", Text: "gửi lỗi: " + err.Error(), Time: time.Now(),
+		})
+		c.writeWithDraft(dlBase, draft)
+		return
+	}
+	c.msgs = append(c.msgs, sent)
+	c.writeWithDraft(dlBase, "")
 }
