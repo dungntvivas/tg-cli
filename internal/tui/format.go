@@ -7,6 +7,7 @@ import (
 
 	"github.com/rivo/uniseg"
 
+	"github.com/user/tgchat/internal/media"
 	"github.com/user/tgchat/internal/telegram"
 )
 
@@ -86,7 +87,7 @@ func isDownloadable(msg telegram.Message) bool {
 // dl:<kind>:<peerID>:<msgID> — app.go's highlighted-func turns a click on
 // that region into a browser download through the loopback server.
 func downloadLine(msg telegram.Message) string {
-	label := mediaGlyph(msg)
+	label := media.Glyph(msg)
 	if label == "" {
 		label = "tệp đính kèm"
 	}

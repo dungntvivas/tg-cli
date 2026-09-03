@@ -57,20 +57,18 @@ type cursorPos struct {
 }
 
 // Run blocks until the user quits. api must be connected before calling.
-func Run(ctx context.Context, api telegram.API, selfName string) error {
+// dlBase is the media server's base URL; empty means the server never
+// started, and download links just toast "unavailable" when clicked.
+func Run(ctx context.Context, api telegram.API, selfName, dlBase string) error {
 	app := &App{
 		tv:           tview.NewApplication(),
 		api:          api,
 		ctx:          ctx,
 		activeIdx:    -1,
 		sidebarShown: true,
+		dlBase:       dlBase,
 	}
 	app.build(selfName)
-	// Loopback download server: chat-pane media links point here. Failure is
-	// non-fatal — links just toast "unavailable" when clicked.
-	if base, err := startDownloadServer(ctx, api); err == nil {
-		app.dlBase = base
-	}
 	// Subscribe to live updates BEFORE the tview loop starts so the
 	// handler is wired before any update arrives. The handler hops onto
 	// the UI goroutine via QueueUpdateDraw — OnMessage itself runs on

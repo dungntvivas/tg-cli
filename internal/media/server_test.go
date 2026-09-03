@@ -1,4 +1,4 @@
-package tui
+package media
 
 import (
 	"context"
@@ -83,9 +83,9 @@ func TestDownloadServer_UpstreamFailureIsNotFound(t *testing.T) {
 func TestStartDownloadServer_ListensLoopback(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	base, err := startDownloadServer(ctx, &telegram.FakeAPI{})
+	base, err := Start(ctx, &telegram.FakeAPI{})
 	if err != nil {
-		t.Fatalf("startDownloadServer: %v", err)
+		t.Fatalf("Start: %v", err)
 	}
 	if !strings.HasPrefix(base, "http://127.0.0.1:") {
 		t.Errorf("baseURL = %q, want loopback http address", base)
@@ -116,9 +116,9 @@ func TestStartDownloadServer_BaseURLOpensFile(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	base, err := startDownloadServer(ctx, api)
+	base, err := Start(ctx, api)
 	if err != nil {
-		t.Fatalf("startDownloadServer: %v", err)
+		t.Fatalf("Start: %v", err)
 	}
 	// Exactly the URL shape openDownloadLink produces.
 	resp, err := http.Get(base + "/user/7/42")

@@ -9,6 +9,7 @@ import (
 
 	"github.com/user/tgchat/internal/auth"
 	"github.com/user/tgchat/internal/config"
+	"github.com/user/tgchat/internal/media"
 	"github.com/user/tgchat/internal/telegram"
 	"github.com/user/tgchat/internal/tui"
 )
@@ -65,6 +66,12 @@ func run() error {
 			return fmt.Errorf("fetch self: %w", err)
 		}
 		fmt.Fprintln(os.Stderr, "connected as", selfName)
-		return tui.Run(ctx, client, selfName)
+		// Loopback media server: chat-pane links and mirrored files both point
+		// here. Failure is non-fatal — links simply stop working.
+		base, err := media.Start(ctx, client)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "download server unavailable:", err)
+		}
+		return tui.Run(ctx, client, selfName, base)
 	})
 }

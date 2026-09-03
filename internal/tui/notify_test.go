@@ -117,20 +117,6 @@ func TestHandleIncoming_LongMessage_TruncatesBody(t *testing.T) {
 	}
 }
 
-// TestTruncateText covers the rune-safe truncation helper directly,
-// including multibyte characters (must count runes, not bytes).
-func TestTruncateText(t *testing.T) {
-	if got := TruncateText("short", 10); got != "short" {
-		t.Errorf("under limit: got %q", got)
-	}
-	if got := TruncateText("abcdefghij", 4); got != "abcd…" {
-		t.Errorf("over limit: got %q, want abcd…", got)
-	}
-	if got := TruncateText("tiếng Việt đấy", 7); got != "tiếng V…" {
-		t.Errorf("multibyte: got %q, want tiếng V…", got)
-	}
-}
-
 // TestHandleIncoming_MediaMessages_DescribedInBody: photos/files have no
 // text — the toast must say WHAT arrived instead of rendering blank.
 func TestHandleIncoming_MediaMessages_DescribedInBody(t *testing.T) {

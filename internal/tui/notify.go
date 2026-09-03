@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"strings"
 
+	"github.com/user/tgchat/internal/media"
 	"github.com/user/tgchat/internal/telegram"
 )
 
@@ -38,53 +39,16 @@ $x.Item(1).AppendChild($t.CreateTextNode($env:TG_NOTIFY_BODY)) | Out-Null
 	return cmd.Run()
 }
 
-// TruncateText cuts s to at most max runes, appending an ellipsis when
-// truncated. Rune-safe so Vietnamese and other multibyte text isn't cut
-// mid-character.
-func TruncateText(s string, max int) string {
-	r := []rune(s)
-	if len(r) <= max {
-		return s
-	}
-	return string(r[:max]) + "…"
-}
-
 // notifyBody builds the toast body for an incoming message: the flattened
 // text when there is one, otherwise a short description of the attachment —
 // photos/files carry no Text at the telegram layer, and a blank notification
 // tells the user nothing.
 func notifyBody(m telegram.Message) string {
 	if s := strings.TrimSpace(m.Text); s != "" {
-		return TruncateText(strings.ReplaceAll(s, "\n", " "), 120)
+		return media.Truncate(strings.ReplaceAll(s, "\n", " "), 120)
 	}
-	if g := mediaGlyph(m); g != "" {
+	if g := media.Glyph(m); g != "" {
 		return g
 	}
 	return "(tin nhắn)"
-}
-
-// mediaGlyph describes an attachment ("📷 Ảnh", "📎 hoa_don.pdf") or ""
-// when nothing specific can be said. Shared by toasts and chat-pane
-// download links so both surfaces describe media identically.
-func mediaGlyph(m telegram.Message) string {
-	switch m.Media {
-	case "photo":
-		return "📷 Ảnh"
-	case "video":
-		return "🎬 Video"
-	case "video_note":
-		return "📹 Video tin nhắn"
-	case "voice":
-		return "🎤 Tin nhắn thoại"
-	case "audio":
-		return "🎵 Nhạc"
-	case "sticker":
-		return "🌟 Sticker"
-	case "gif":
-		return "🎞 GIF"
-	case "", "media", "file":
-		return ""
-	default:
-		return "📎 " + TruncateText(m.Media, 100) // filename from telegram layer
-	}
 }

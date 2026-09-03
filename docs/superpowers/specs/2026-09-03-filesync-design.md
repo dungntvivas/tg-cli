@@ -40,17 +40,17 @@ key desynchronise Telegram's `pts`/`qts` cursors, silently dropping updates on b
 
 ```
 main.go
-  |- dl.Start(ctx, api)                        -> baseURL
+  |- media.Start(ctx, api)                     -> baseURL
   |- go filesync.Run(ctx, api, baseURL, dir)   <- background
   \- tui.Run(ctx, api, selfName, baseURL)      <- blocking, as today
 ```
 
 ## Changes to existing code
 
-### `internal/dl/` (new package, moved code)
+### `internal/media/` (new package, moved code)
 
-`internal/tui/download_server.go` moves to `internal/dl/server.go` with no logic change:
-`dlServer`, `startDownloadServer` → `dl.Start`, `randToken`, `ServeHTTP`. It now has two
+`internal/tui/download_server.go` moves to `internal/media/server.go` with no logic change:
+`dlServer`, `startDownloadServer` → `media.Start`, `randToken`, `ServeHTTP`. It now has two
 consumers — the TUI (clickable regions) and filesync (URLs written into text) — so it no
 longer belongs to the TUI package.
 
@@ -134,8 +134,8 @@ over `fsnotify` to avoid a new dependency, and because `fsnotify` on Windows emi
 duplicate events that need the same debounce anyway). On change:
 
 1. Read the file, take everything after the marker, trim trailing whitespace
-2. Skip if empty, or identical to the draft filesync itself last wrote (prevents a
-   write → notice → resend loop)
+2. Skip if empty, or if the file's mtime still matches the one recorded after our own last
+   write (prevents a write → notice → resend loop)
 3. `Send(ctx, peer, draft)` — the entire compose area is **one** message, newlines preserved
 4. Append the sent message to the in-memory log and rewrite the file with an empty
    compose area
@@ -159,7 +159,7 @@ so the user sees the failure in the file and can retry by saving again.
 | File write fails | Log, retry on the next change |
 | User deletes a synced file | Recreated from memory on the next write to it |
 | `Send` fails | Draft preserved, warning line appended to log |
-| Download URL unavailable (`dl.Start` failed) | Media renders label-only, no URL |
+| Download URL unavailable (`media.Start` failed) | Media renders label-only, no URL |
 
 Filesync never takes down the TUI.
 
