@@ -67,8 +67,9 @@ type API interface {
 	// Download streams that media into w (no full-file buffering).
 	Download(ctx context.Context, peer Peer, msgID int64, w io.Writer) (MediaInfo, error)
 	// OnMessage registers a callback fired for each newly-received message.
-	// Multiple calls replace the previous handler. The handler is called from
-	// gotd's update goroutine — implementations must not block.
+	// Every registered handler is called, in registration order — the TUI and
+	// filesync both subscribe. The handler is called from gotd's update
+	// goroutine — implementations must not block.
 	OnMessage(handler func(Message))
 }
 

@@ -179,21 +179,18 @@ func TestDispatch_NoHandler(t *testing.T) {
 	}
 }
 
-// TestOnMessage_Replace verifies the most recently registered handler wins
-// (the documented contract — multiple calls replace).
-func TestOnMessage_Replace(t *testing.T) {
+// TestOnMessage_FansOutToEveryHandler: the TUI and filesync both subscribe.
+// Registering a second handler must not silence the first.
+func TestOnMessage_FansOutToEveryHandler(t *testing.T) {
 	c := &Client{}
-	var first, second int
-	c.OnMessage(func(Message) { first++ })
-	c.OnMessage(func(Message) { second++ })
+	var got []string
+	c.OnMessage(func(Message) { got = append(got, "first") })
+	c.OnMessage(func(Message) { got = append(got, "second") })
 	_ = c.handleUpdate(context.Background(), &tg.UpdateShortMessage{
 		ID: 1, UserID: 1, Message: "x", Date: 1,
 	})
-	if first != 0 {
-		t.Errorf("replaced handler still firing: first=%d", first)
-	}
-	if second != 1 {
-		t.Errorf("replacement handler not called: second=%d", second)
+	if len(got) != 2 || got[0] != "first" || got[1] != "second" {
+		t.Errorf("handlers fired = %v, want [first second]", got)
 	}
 }
 

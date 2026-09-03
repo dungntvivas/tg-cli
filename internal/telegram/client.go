@@ -18,8 +18,11 @@ type Client struct {
 	raw     *telegram.Client
 	storage session.Storage
 
-	mu    sync.Mutex
-	onMsg func(Message) // latest registered OnMessage handler (replaced on each registration)
+	mu sync.Mutex
+	// handlers are every callback registered via OnMessage. Both the TUI and
+	// filesync subscribe, so registration appends rather than replaces —
+	// replacing would silently deafen whoever registered first.
+	handlers []func(Message)
 }
 
 // New constructs a Client. sessionFile is the path to a JSON file (gotd-managed).
@@ -99,12 +102,12 @@ func (c *Client) Close() error {
 	return nil
 }
 
-// OnMessage registers the callback fired for each newly-received message.
-// Replaces any previously-registered handler. Called from gotd's update
-// goroutine; implementations must not block.
+// OnMessage registers a callback fired for each newly-received message.
+// Every registered handler is called, in registration order. Called from
+// gotd's update goroutine; implementations must not block.
 func (c *Client) OnMessage(handler func(Message)) {
 	c.mu.Lock()
-	c.onMsg = handler
+	c.handlers = append(c.handlers, handler)
 	c.mu.Unlock()
 }
 
@@ -214,16 +217,16 @@ func (c *Client) dispatchSingleUpdate(ctx context.Context, u tg.UpdateClass, use
 	}
 }
 
-// fire invokes the registered handler if any. Pulls it under the lock so
-// OnMessage can replace it concurrently without races.
+// fire invokes every registered handler. The slice is copied under the lock
+// so OnMessage can register concurrently without racing the iteration.
 func (c *Client) fire(m Message) {
 	c.mu.Lock()
-	h := c.onMsg
+	hs := make([]func(Message), len(c.handlers))
+	copy(hs, c.handlers)
 	c.mu.Unlock()
-	if h == nil {
-		return
+	for _, h := range hs {
+		h(m)
 	}
-	h(m)
 }
 
 // Dialogs returns the user's recent conversations via gotd's messages.getDialogs.
