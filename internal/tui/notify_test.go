@@ -131,6 +131,38 @@ func TestTruncateText(t *testing.T) {
 	}
 }
 
+// TestHandleIncoming_MediaMessages_DescribedInBody: photos/files have no
+// text — the toast must say WHAT arrived instead of rendering blank.
+func TestHandleIncoming_MediaMessages_DescribedInBody(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  telegram.Message
+		want string
+	}{
+		{"photo", telegram.Message{ID: 1, PeerID: 99, PeerKind: "user", Media: "photo"}, "📷 Ảnh"},
+		{"named file", telegram.Message{ID: 2, PeerID: 99, PeerKind: "user", Media: "hoa_don.pdf"}, "📎 hoa_don.pdf"},
+		{"voice", telegram.Message{ID: 3, PeerID: 99, PeerKind: "user", Media: "voice"}, "🎤 Tin nhắn thoại"},
+		{"video", telegram.Message{ID: 4, PeerID: 99, PeerKind: "user", Media: "video"}, "🎬 Video"},
+		{"sticker", telegram.Message{ID: 5, PeerID: 99, PeerKind: "user", Media: "sticker"}, "🌟 Sticker"},
+		{"text beats media", telegram.Message{ID: 6, PeerID: 99, PeerKind: "user", Media: "photo", Text: "caption"}, "caption"},
+		{"unknown falls back", telegram.Message{ID: 7, PeerID: 99, PeerKind: "user"}, "(tin nhắn)"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			a, _ := newTestApp([]telegram.Dialog{{ID: 99, Kind: "user", Title: "Bob"}})
+			ch := capturePush(t)
+			a.handleIncoming(tc.msg)
+			title, body, _ := strings.Cut(<-ch, "|")
+			if title != "Bob" {
+				t.Errorf("title = %q, want Bob", title)
+			}
+			if body != tc.want {
+				t.Errorf("body = %q, want %q", body, tc.want)
+			}
+		})
+	}
+}
+
 // TestSendWindowsToast_Smoke fires a REAL Windows toast through the
 // production path. Opt-in because it pops up on screen:
 //
