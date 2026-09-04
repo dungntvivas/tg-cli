@@ -2,7 +2,9 @@ package filesync
 
 import (
 	"context"
+	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -117,18 +119,46 @@ func (c *chatFile) checkAndSend(ctx context.Context, api telegram.API, dlBase st
 		c.mtime = fi.ModTime()
 		return
 	}
-	sent, err := api.Send(ctx, c.peer, draft)
+	sent, err := c.send(ctx, api, draft)
 	if err != nil {
 		// Keep the draft so saving again retries, and put the failure where
 		// the user is already looking.
 		c.msgs = append(c.msgs, telegram.Message{
-			Sender: "⚠", Text: "gửi lỗi: " + err.Error(), Time: time.Now(),
+			Sender: "⚠", Text: err.Error(), Time: time.Now(),
 		})
 		c.writeWithDraft(dlBase, draft)
 		return
 	}
 	c.msgs = append(c.msgs, sent)
 	c.writeWithDraft(dlBase, "")
+}
+
+// send dispatches one compose area: an attachment when it starts with @,
+// otherwise plain text. Caller holds c.mu.
+func (c *chatFile) send(ctx context.Context, api telegram.API, draft string) (telegram.Message, error) {
+	path, caption, text := parseDraft(draft)
+	if path == "" {
+		m, err := api.Send(ctx, c.peer, text)
+		if err != nil {
+			return m, fmt.Errorf("gửi lỗi: %w", err)
+		}
+		return m, nil
+	}
+	// Relative paths mean "next to the conversation" — the chat folder is
+	// the workspace root the user has open.
+	if !filepath.IsAbs(path) {
+		path = filepath.Join(filepath.Dir(c.path), path)
+	}
+	// Check before uploading: a typo should cost nothing and leave the draft
+	// editable, not burn an API call and a flood-wait slot.
+	if _, err := os.Stat(path); err != nil {
+		return telegram.Message{}, fmt.Errorf("không tìm thấy file: %s", path)
+	}
+	m, err := api.SendFile(ctx, c.peer, path, caption)
+	if err != nil {
+		return m, fmt.Errorf("gửi file lỗi: %w", err)
+	}
+	return m, nil
 }
 
 // setMtime backdates the file and records the new timestamp, so the poll

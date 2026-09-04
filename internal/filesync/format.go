@@ -43,9 +43,16 @@ func line(m telegram.Message, dlBase string) string {
 		// The telegram layer says "You"; the file is Vietnamese.
 		sender = "Bạn"
 	}
+	// Media first, then the caption on its own line. Showing only the caption
+	// would hide the download link, leaving a captioned attachment
+	// unreachable from the file.
 	body := m.Text
-	if body == "" {
-		body = mediaBody(m, dlBase)
+	if mb := mediaBody(m, dlBase); mb != "" {
+		if body == "" {
+			body = mb
+		} else {
+			body = mb + "\n" + body
+		}
 	}
 	parts := strings.Split(body, "\n")
 	out := fmt.Sprintf("[%s] %s: %s", m.Time.Format("15:04"), sender, parts[0])
@@ -58,9 +65,12 @@ func line(m telegram.Message, dlBase string) string {
 // mediaBody describes an attachment and appends its download link, so
 // Ctrl+click in the editor saves the file through the loopback server.
 func mediaBody(m telegram.Message, dlBase string) string {
+	if m.Media == "" {
+		return "" // plain text — nothing to attach
+	}
 	label := media.Glyph(m)
 	if label == "" {
-		label = "📎 tệp đính kèm"
+		label = "📎 tệp đính kèm" // "media"/"file": known attachment, unknown kind
 	}
 	if u := media.URL(dlBase, m); u != "" {
 		return label + " " + u

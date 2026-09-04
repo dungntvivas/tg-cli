@@ -99,6 +99,8 @@ Three files, each with one job:
   `[HH:MM] ` prefix. Fixed, not aligned to the sender name, so the indent is deterministic.
 - Media messages render as `<glyph> <label> <url>`, where the URL is the same
   `dlServer` link the TUI uses. `Ctrl+click` in VS Code opens it; the browser saves the file.
+  A captioned attachment renders the media line first and the caption underneath — showing
+  only the caption would hide the link and make the attachment unreachable from the file.
 - Everything after the marker line is the compose area
 
 ### Editor workspace
@@ -145,6 +147,14 @@ a dialog that becomes active later shows up in the folder on the next restart. M
 **Incoming message.** The `OnMessage` handler appends to the in-memory log for that peer
 and rewrites its file. Messages for peers outside the synced set are ignored — they remain
 visible in the TUI.
+
+**Sending a file.** A compose area whose *first* line starts with `@` is an attachment:
+everything after the `@` is the path (spaces allowed), the lines below are the caption.
+Restricting `@` to the first line is what keeps `gửi cho @dungvivas` and email addresses from
+being read as attachments. Relative paths resolve against the chat folder. The file is
+`os.Stat`-checked before any upload, so a typo costs no API call and leaves the draft
+editable. `telegram.SendFile` uploads via gotd's chunked `uploader`, sending
+`.png/.jpg/.jpeg/.webp` as photos and everything else as a document with its filename.
 
 **Outgoing message.** A goroutine polls each file's `mtime` every 500ms (`os.Stat`; chosen
 over `fsnotify` to avoid a new dependency, and because `fsnotify` on Windows emits

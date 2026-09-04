@@ -50,3 +50,34 @@ func TestRender_MediaWithoutServer(t *testing.T) {
 		t.Errorf("Render = %q, want %q", got, want)
 	}
 }
+
+// TestRender_MediaWithCaption: a photo or file sent with a caption must show
+// BOTH — before this, Text won and the download link vanished entirely, so a
+// captioned attachment was unreachable from the file.
+func TestRender_MediaWithCaption(t *testing.T) {
+	msgs := []telegram.Message{{
+		ID: 1204, PeerID: 88, PeerKind: "user", Sender: "Nam",
+		Media: "báo cáo.pdf", Text: "gửi anh xem giúp nhé", Time: at(10, 31),
+	}}
+	want := "[10:31] Nam: 📎 báo cáo.pdf http://x/dl/t/user/88/1204\n" +
+		"        gửi anh xem giúp nhé\n" +
+		"\n--- gõ dưới đây ---\n"
+	if got := Render(msgs, "http://x/dl/t"); got != want {
+		t.Errorf("Render =\n%q\nwant\n%q", got, want)
+	}
+}
+
+// TestRender_MultiLineCaption keeps every caption line under the same indent.
+func TestRender_MultiLineCaption(t *testing.T) {
+	msgs := []telegram.Message{{
+		ID: 7, PeerID: 88, PeerKind: "user", Sender: "You", Outgoing: true,
+		Media: "photo", Text: "dòng 1\ndòng 2", Time: at(8, 5),
+	}}
+	want := "[08:05] Bạn: 📷 Ảnh http://x/dl/t/user/88/7\n" +
+		"        dòng 1\n" +
+		"        dòng 2\n" +
+		"\n--- gõ dưới đây ---\n"
+	if got := Render(msgs, "http://x/dl/t"); got != want {
+		t.Errorf("Render =\n%q\nwant\n%q", got, want)
+	}
+}

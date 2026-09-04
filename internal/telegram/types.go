@@ -60,6 +60,10 @@ type API interface {
 	Dialogs(ctx context.Context) ([]Dialog, error)
 	History(ctx context.Context, peer Peer, limit int) ([]Message, error)
 	Send(ctx context.Context, peer Peer, text string) (Message, error)
+	// SendFile uploads a local file and posts it to peer. caption becomes the
+	// message text; "" sends the attachment alone. Images go as photos,
+	// everything else as a document keeping its filename.
+	SendFile(ctx context.Context, peer Peer, path, caption string) (Message, error)
 	// MarkRead notifies the server that all messages in `peer` are read.
 	// TUI calls this when opening a dialog so the unread badge clears.
 	MarkRead(ctx context.Context, peer Peer) error
@@ -79,6 +83,7 @@ type FakeAPI struct {
 	DialogsFn   func(ctx context.Context) ([]Dialog, error)
 	HistoryFn   func(ctx context.Context, peer Peer, limit int) ([]Message, error)
 	SendFn      func(ctx context.Context, peer Peer, text string) (Message, error)
+	SendFileFn  func(ctx context.Context, peer Peer, path, caption string) (Message, error)
 	MarkReadFn  func(ctx context.Context, peer Peer) error
 	StatFn      func(ctx context.Context, peer Peer, msgID int64) (MediaInfo, error)
 	DownloadFn  func(ctx context.Context, peer Peer, msgID int64, w io.Writer) (MediaInfo, error)
@@ -118,6 +123,13 @@ func (f *FakeAPI) Send(ctx context.Context, peer Peer, text string) (Message, er
 		return Message{}, nil
 	}
 	return f.SendFn(ctx, peer, text)
+}
+
+func (f *FakeAPI) SendFile(ctx context.Context, peer Peer, path, caption string) (Message, error) {
+	if f.SendFileFn == nil {
+		return Message{}, nil
+	}
+	return f.SendFileFn(ctx, peer, path, caption)
 }
 
 func (f *FakeAPI) MarkRead(ctx context.Context, peer Peer) error {

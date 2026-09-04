@@ -36,10 +36,8 @@ func TestRun_DumpsDialogsToFiles(t *testing.T) {
 			55: {{ID: 2, Sender: "Linh", Text: "deploy chưa"}},
 		},
 	)
-	ctx, cancel := context.WithCancel(context.Background())
-	go Run(ctx, api, "", dir)
+	startSync(t, api, dir)
 	waitForFile(t, filepath.Join(dir, "Nhóm Dev.md"))
-	cancel()
 
 	for name, want := range map[string]string{"Nam.md": "chào", "Nhóm Dev.md": "deploy chưa"} {
 		b, err := os.ReadFile(filepath.Join(dir, name))
@@ -75,10 +73,8 @@ func TestRun_CapsDialogCount(t *testing.T) {
 			return nil, nil
 		},
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	go Run(ctx, api, "", dir)
+	startSync(t, api, dir)
 	waitFor(t, func() bool { return histCalls.Load() >= maxDialogs })
-	cancel()
 
 	if got := histCalls.Load(); got != maxDialogs {
 		t.Errorf("History called %d times, want %d", got, maxDialogs)
@@ -96,9 +92,7 @@ func TestRun_IncomingMessageAppendsToFile(t *testing.T) {
 	)
 	api.OnMessageFn = func(h func(telegram.Message)) { registered <- h }
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go Run(ctx, api, "", dir)
+	startSync(t, api, dir)
 	handler := <-registered
 
 	handler(telegram.Message{ID: 9, PeerID: 88, PeerKind: "user", Sender: "Nam", Text: "tin mới đến"})
@@ -120,9 +114,7 @@ func TestRun_IgnoresUnsyncedPeer(t *testing.T) {
 	)
 	api.OnMessageFn = func(h func(telegram.Message)) { registered <- h }
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go Run(ctx, api, "", dir)
+	startSync(t, api, dir)
 	handler := <-registered
 
 	handler(telegram.Message{ID: 9, PeerID: 999, PeerKind: "user", Sender: "Ai đó", Text: "lạ"})
@@ -147,9 +139,7 @@ func TestRun_PollSendsSavedDraft(t *testing.T) {
 		return telegram.Message{ID: 10, Text: text, Outgoing: true}, nil
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go Run(ctx, api, "", dir)
+	startSync(t, api, dir)
 	path := filepath.Join(dir, "Nam.md")
 	waitForFile(t, path)
 
@@ -199,9 +189,7 @@ func TestRun_SkipsBotDialogs(t *testing.T) {
 			77: {{ID: 2, Sender: "GitHubBot", Text: "build passed"}},
 		},
 	)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go Run(ctx, api, "", dir)
+	startSync(t, api, dir)
 	waitForFile(t, filepath.Join(dir, "Nam.md"))
 	time.Sleep(50 * time.Millisecond)
 
@@ -227,9 +215,7 @@ func TestRun_BotMessagesAreIgnored(t *testing.T) {
 	)
 	api.OnMessageFn = func(h func(telegram.Message)) { registered <- h }
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go Run(ctx, api, "", dir)
+	startSync(t, api, dir)
 	handler := <-registered
 
 	handler(telegram.Message{ID: 9, PeerID: 77, PeerKind: "user", Sender: "GitHubBot", Text: "build passed"})
@@ -255,9 +241,7 @@ func TestMaxDialogs(t *testing.T) {
 func TestRun_WritesEditorSettings(t *testing.T) {
 	dir := t.TempDir()
 	api := dumpAPI(nil, nil)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go Run(ctx, api, "", dir)
+	startSync(t, api, dir)
 
 	settings := filepath.Join(dir, ".vscode", "settings.json")
 	waitForFile(t, settings)
@@ -280,9 +264,7 @@ func TestRun_KeepsExistingEditorSettings(t *testing.T) {
 
 	api := dumpAPI([]telegram.Dialog{{ID: 88, Kind: "user", Title: "Nam", LastTime: time.Now()}},
 		map[int64][]telegram.Message{88: nil})
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go Run(ctx, api, "", dir)
+	startSync(t, api, dir)
 	waitForFile(t, filepath.Join(dir, "Nam.md"))
 
 	b, _ := os.ReadFile(settings)
@@ -306,9 +288,7 @@ func TestRun_FileMtimeMatchesLastMessage(t *testing.T) {
 		},
 		map[int64][]telegram.Message{88: nil, 55: nil},
 	)
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go Run(ctx, api, "", dir)
+	startSync(t, api, dir)
 	waitForFile(t, filepath.Join(dir, "Cũ.md"))
 
 	fiNew, err := os.Stat(filepath.Join(dir, "Nam.md"))
@@ -342,9 +322,7 @@ func TestRun_BackdatedMtimeDoesNotLookLikeAUserSave(t *testing.T) {
 		sendCalls.Add(1)
 		return telegram.Message{ID: 2, Text: text}, nil
 	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	go Run(ctx, api, "", dir)
+	startSync(t, api, dir)
 	waitForFile(t, filepath.Join(dir, "Nam.md"))
 
 	// Long enough for several poll ticks.
@@ -370,4 +348,21 @@ func mdCount(t *testing.T, dir string) int {
 		}
 	}
 	return n
+}
+
+// startSync runs filesync in the background and makes the test wait for it to
+// stop before t.TempDir cleanup. Without the wait a poll-loop write can race
+// the directory removal and fail the test spuriously.
+func startSync(t *testing.T, api telegram.API, dir string) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		Run(ctx, api, "", dir)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		<-done
+	})
 }

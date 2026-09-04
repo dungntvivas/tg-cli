@@ -215,3 +215,24 @@ func TestDialogFromGotd_BotFlag(t *testing.T) {
 		})
 	}
 }
+
+// TestIsImage decides photo-vs-document: images go as photos so they preview
+// inline, everything else as a document keeping its original filename.
+func TestIsImage(t *testing.T) {
+	cases := map[string]bool{
+		"anh.png":         true,
+		"ANH.JPG":         true,
+		"scan.jpeg":       true,
+		"sticker.webp":    true,
+		"báo cáo.pdf":     false,
+		"video.mp4":       false,
+		"archive.png.zip": false,
+		"noextension":     false,
+		"anh.png.exe":     false,
+	}
+	for name, want := range cases {
+		if got := isImage(name); got != want {
+			t.Errorf("isImage(%q) = %v, want %v", name, got, want)
+		}
+	}
+}
